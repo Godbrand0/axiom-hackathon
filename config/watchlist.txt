@@ -1,0 +1,32 @@
+# One ticker per line. '#' starts a comment.
+# Start small and liquid; paste the S&P 500 / Nasdaq-100 list here later for a wider daily scan.
+AAPL
+MSFT
+NVDA
+AMZN
+GOOGL
+META
+TSLA
+AVGO
+AMD
+NFLX
+COST
+JPM
+V
+MA
+UNH
+LLY
+XOM
+HD
+CRM
+ORCL
+ADBE
+QCOM
+INTC
+MU
+PLTR
+UBER
+SHOP
+PANW
+CAT
+GE

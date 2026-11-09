@@ -1,0 +1,6 @@
+/target
+.env
+*.db
+*.db-journal
+/reports
+trades.csv

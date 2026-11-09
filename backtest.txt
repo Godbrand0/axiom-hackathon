@@ -1,0 +1,115 @@
+Universe: 503 symbols | data 2018-10-15 -> 2026-11-06 | costs 5 bps/side
+Index membership: point-in-time add dates for 503 symbols; 122 joined after 2018-10-15 and only count from their add date
+In-sample: 2019-10-16 -> 2024-09-23 | Out-of-sample: 2024-09-23 -> 2026-11-06
+SPY buy & hold: IS +106.2% | OOS +32.1%
+Tune rules looking at in-sample only; out-of-sample is your honest estimate.
+
+== trend-pullback ==
+Long. Close > SMA200 and SMA50 > SMA200; day's low within 1% of EMA21 and close back above it; RSI(14) 35-55; close > open; avg dollar volume >= $20M. Stop = entry - 2*ATR14, target = entry + 4*ATR14, max hold 20 sessions.
+  IS : 9950 trades | win 45% | avg win +6.48% | avg loss -4.51% | expectancy +0.47%/trade | PF 1.19 | avg +0.09R | avg hold 12.9d
+         median -1.66% | mean without best 5 trades +0.46% | 90% CI of mean [+0.37%, +0.58%]
+         vs SPY held 13 sessions: +0.86%/hold -> edge -0.39%
+         vs same stocks, random day, held 13 sessions: +0.87%/hold -> edge -0.40% => WORSE than random entry
+         entries only (no exits, held 13, before costs): +0.48%/hold -> edge -0.38% => WORSE than random entry
+  OOS: 4303 trades | win 42% | avg win +7.40% | avg loss -4.99% | expectancy +0.21%/trade | PF 1.07 | avg +0.07R | avg hold 12.4d
+         median -2.65% | mean without best 5 trades +0.15% | 90% CI of mean [+0.02%, +0.39%]
+         vs SPY held 12 sessions: +0.75%/hold -> edge -0.54%
+         vs same stocks, random day, held 12 sessions: +0.65%/hold -> edge -0.44% => WORSE than random entry
+         entries only (no exits, held 12, before costs): +0.51%/hold -> edge -0.14% => not distinguishable from random entry
+  OOS exits: 943 target / 2110 stop / 0 rule / 1250 time
+
+== breakout-52w ==
+Long. Close above the prior 252-session high; volume >= 1.5x 50-day average; close > SMA50; avg dollar volume >= $20M. Stop = entry - 2*ATR14, target = entry + 4*ATR14, max hold 40 sessions.
+  IS : 1951 trades | win 41% | avg win +7.76% | avg loss -4.74% | expectancy +0.33%/trade | PF 1.12 | avg +0.12R | avg hold 17.2d
+         median -2.95% | mean without best 5 trades +0.28% | 90% CI of mean [+0.08%, +0.59%]
+         vs SPY held 17 sessions: +1.11%/hold -> edge -0.78%
+         vs same stocks, random day, held 17 sessions: +1.11%/hold -> edge -0.79% => WORSE than random entry
+         entries only (no exits, held 17, before costs): +0.51%/hold -> edge -0.60% => WORSE than random entry
+  OOS: 1007 trades | win 35% | avg win +9.81% | avg loss -5.34% | expectancy -0.06%/trade | PF 0.98 | avg -0.04R | avg hold 15.2d
+         median -3.73% | mean without best 5 trades -0.23% | 90% CI of mean [-0.48%, +0.36%]
+         vs SPY held 15 sessions: +0.95%/hold -> edge -1.00%
+         vs same stocks, random day, held 15 sessions: +0.80%/hold -> edge -0.86% => WORSE than random entry
+         entries only (no exits, held 15, before costs): +0.72%/hold -> edge -0.08% => not distinguishable from random entry
+  OOS exits: 294 target / 627 stop / 0 rule / 86 time
+
+== rsi2-pullback ==
+Long. Close > SMA200 (long-term uptrend); RSI(2) < 10 (sharp 1-3 day selloff); avg dollar volume >= $20M. Exit on the first close above SMA5. Catastrophe stop = entry - 3*ATR14, cap = entry + 3*ATR14, max hold 10 sessions.
+  IS : 14999 trades | win 66% | avg win +1.87% | avg loss -3.19% | expectancy +0.17%/trade | PF 1.16 | avg +0.04R | avg hold 3.5d
+         median +0.80% | mean without best 5 trades +0.16% | 90% CI of mean [+0.12%, +0.21%]
+         vs SPY held 4 sessions: +0.26%/hold -> edge -0.10%
+         vs same stocks, random day, held 4 sessions: +0.27%/hold -> edge -0.10% => WORSE than random entry
+         entries only (no exits, held 4, before costs): +0.21%/hold -> edge -0.06% => WORSE than random entry
+  OOS: 6975 trades | win 64% | avg win +2.20% | avg loss -3.32% | expectancy +0.20%/trade | PF 1.17 | avg +0.03R | avg hold 3.7d
+         median +0.79% | mean without best 5 trades +0.18% | 90% CI of mean [+0.13%, +0.28%]
+         vs SPY held 4 sessions: +0.24%/hold -> edge -0.04%
+         vs same stocks, random day, held 4 sessions: +0.22%/hold -> edge -0.02% => not distinguishable from random entry
+         entries only (no exits, held 4, before costs): +0.40%/hold -> edge +0.18% => EDGE (90% CI clears baseline)
+  OOS exits: 91 target / 644 stop / 6145 rule / 95 time
+
+== gap-drift ==
+Long. Open >= 4% above the prior close; volume >= 3x 50-day average; close >= open (gap held all day); avg dollar volume >= $20M. Stop = prior close (gap fully filled = thesis broken), cap = entry + 8*ATR14, max hold 40 sessions.
+  IS : 334 trades | win 54% | avg win +11.02% | avg loss -8.38% | expectancy +2.07%/trade | PF 1.54 | avg +0.15R | avg hold 31.6d
+         median +0.89% | mean without best 5 trades +1.27% | 90% CI of mean [+0.95%, +3.26%]
+         vs SPY held 32 sessions: +2.09%/hold -> edge -0.01%
+         vs same stocks, random day, held 32 sessions: +2.09%/hold -> edge -0.02% => not distinguishable from random entry
+         entries only (no exits, held 32, before costs): +2.06%/hold -> edge -0.03% => not distinguishable from random entry
+  OOS: 185 trades | win 42% | avg win +14.09% | avg loss -8.59% | expectancy +0.85%/trade | PF 1.17 | avg +0.01R | avg hold 29.5d
+         median -3.38% | mean without best 5 trades -0.43% | 90% CI of mean [-0.82%, +2.58%]
+         vs SPY held 29 sessions: +1.89%/hold -> edge -1.04%
+         vs same stocks, random day, held 29 sessions: +1.48%/hold -> edge -0.63% => not distinguishable from random entry
+         entries only (no exits, held 29, before costs): -1.11%/hold -> edge -2.58% => WORSE than random entry
+  OOS exits: 15 target / 70 stop / 0 rule / 100 time
+
+== momentum-12-1 ==
+Portfolio. At each month-end, rank liquid stocks (avg dollar volume >= $20M) by return from 252 to 21 sessions ago; buy the top 10% equal-weight at the next open, hold one month, rebalance.
+  IS : 59 months | top 10% +1.37%/mo (total +103.60%) | equal-weight universe +1.34%/mo (total +98.77%) | SPY +1.36%/mo (total +103.15%)
+         excess vs universe +0.03%/mo, 90% CI [-0.53%, +0.57%] | beat universe in 54% of months => not distinguishable from equal-weight universe
+  OOS: 25 months | top 10% +2.13%/mo (total +60.36%) | equal-weight universe +1.08%/mo (total +29.29%) | SPY +1.28%/mo (total +35.51%)
+         excess vs universe +1.04%/mo, 90% CI [-1.02%, +2.99%] | beat universe in 72% of months => not distinguishable from equal-weight universe
+
+== quality ==
+Portfolio. At each month-end, rank stocks by trailing-12-month operating cash flow / total assets, using only 10-Q/10-K data filed by that date; hold the top 10% equal-weight for a month.
+  IS : 59 months | top 10% +1.53%/mo (total +120.91%) | equal-weight universe +1.33%/mo (total +97.80%) | SPY +1.36%/mo (total +103.15%)
+         excess vs universe +0.20%/mo, 90% CI [-0.37%, +0.75%] | beat universe in 54% of months => not distinguishable from equal-weight universe
+  OOS: 25 months | top 10% +1.17%/mo (total +31.93%) | equal-weight universe +1.11%/mo (total +30.21%) | SPY +1.28%/mo (total +35.51%)
+         excess vs universe +0.06%/mo, 90% CI [-0.63%, +0.81%] | beat universe in 40% of months => not distinguishable from equal-weight universe
+
+== value ==
+Portfolio. At each month-end, rank stocks by earnings yield (trailing-12-month diluted EPS / month-end price as quoted then); hold the top 10% equal-weight for a month.
+  IS : 59 months | top 10% +1.31%/mo (total +76.81%) | equal-weight universe +1.33%/mo (total +97.74%) | SPY +1.36%/mo (total +103.15%)
+         excess vs universe -0.03%/mo, 90% CI [-0.69%, +0.58%] | beat universe in 51% of months => not distinguishable from equal-weight universe
+  OOS: 25 months | top 10% +1.45%/mo (total +40.72%) | equal-weight universe +1.10%/mo (total +29.79%) | SPY +1.28%/mo (total +35.51%)
+         excess vs universe +0.35%/mo, 90% CI [-0.42%, +1.14%] | beat universe in 56% of months => not distinguishable from equal-weight universe
+
+== quality-value ==
+Portfolio. At each month-end, average each stock's percentile rank on quality and on value; hold the top 10% equal-weight for a month.
+  IS : 59 months | top 10% +1.27%/mo (total +84.71%) | equal-weight universe +1.33%/mo (total +98.04%) | SPY +1.36%/mo (total +103.15%)
+         excess vs universe -0.06%/mo, 90% CI [-0.51%, +0.40%] | beat universe in 49% of months => not distinguishable from equal-weight universe
+  OOS: 25 months | top 10% +1.40%/mo (total +39.23%) | equal-weight universe +1.12%/mo (total +30.38%) | SPY +1.28%/mo (total +35.51%)
+         excess vs universe +0.28%/mo, 90% CI [-0.54%, +1.01%] | beat universe in 60% of months => not distinguishable from equal-weight universe
+
+== earnings-drift ==
+Event study. Long after a strong earnings beat (SUE >= 2: EPS vs the same quarter a year earlier, scaled by its past variability), held 60 sessions with no stop. Strong misses (SUE <= -2) shown for contrast.
+  12086 quarterly surprises from 502 companies
+  IS :
+    beats, bought after the filing (what Axiom can act on)
+      576 events | mean +3.93%/trade | median +3.64% | win 61% | 90% CI [+2.98%, +4.92%]
+      vs same stocks, random day, held 60: +3.62% -> edge +0.31% => not distinguishable from random entry
+    misses, bought after the filing (drift predicts WORSE)
+      609 events | mean +2.89%/trade | median +3.06% | win 60% | 90% CI [+1.80%, +3.99%]
+      vs same stocks, random day, held 60: +3.70% -> edge -0.80% => not distinguishable from random entry
+    beats, bought after the price reaction (needs press-release data)
+      576 events | mean +4.52%/trade | median +3.51% | win 63% | 90% CI [+3.55%, +5.55%]
+      vs same stocks, random day, held 60: +3.62% -> edge +0.90% => not distinguishable from random entry
+  OOS:
+    beats, bought after the filing (what Axiom can act on)
+      288 events | mean +3.51%/trade | median -0.60% | win 48% | 90% CI [+1.54%, +5.59%]
+      vs same stocks, random day, held 60: +3.27% -> edge +0.24% => not distinguishable from random entry
+    misses, bought after the filing (drift predicts WORSE)
+      210 events | mean +3.17%/trade | median +1.77% | win 57% | 90% CI [+1.48%, +4.99%]
+      vs same stocks, random day, held 60: +3.16% -> edge +0.02% => not distinguishable from random entry
+    beats, bought after the price reaction (needs press-release data)
+      294 events | mean +3.07%/trade | median -0.61% | win 48% | 90% CI [+1.04%, +5.23%]
+      vs same stocks, random day, held 60: +3.27% -> edge -0.19% => not distinguishable from random entry
+
+Caveat: survivorship bias. Stocks removed from the index (often after falling) are missing, so results are still somewhat optimistic.
