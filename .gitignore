@@ -4,3 +4,4 @@
 *.db-journal
 /reports
 trades.csv
+/contract/target
