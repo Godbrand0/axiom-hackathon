@@ -14,3 +14,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# NEAR / Axiom Pay
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+bs58 = "0.5"
+ed25519-dalek = "2"
+getrandom = "0.2"
+sha2 = "0.10"

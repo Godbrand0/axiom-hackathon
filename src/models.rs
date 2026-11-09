@@ -1,5 +1,5 @@
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One daily OHLCV bar (split/dividend adjusted).
 #[derive(Debug, Clone, Serialize)]
@@ -21,7 +21,7 @@ pub struct NewsItem {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filing {
     pub form: String,
     pub filed: NaiveDate,

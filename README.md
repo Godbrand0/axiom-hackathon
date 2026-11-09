@@ -4,6 +4,8 @@ A personal research agent for US stocks, written in Rust. It scans a watchlist a
 
 **Research only.** It never connects to a brokerage and never places trades.
 
+> **NEAR HACKATHON:** Axiom Pay, the NEAR layer, gives the agent an owner-limited budget for buying evidence from other agents (pay-per-call, with on-chain receipts) and commits every signal on-chain before its outcome is known, so the track record can't be rewritten. Setup, demo steps and limits are in **[NEAR.md](NEAR.md)**. The NEAR part runs without any market-data keys.
+
 ## How it works
 
 ```
