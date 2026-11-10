@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { BASE_PATH, SELLER } from "./config";
-import { Commitment, Receipt, Service, TrackRecord, view } from "./near";
+import { MemeRecord } from "./meme";
+import { Commitment, Job, Pool, Receipt, SellerStats, Service, TrackRecord, view } from "./near";
 
 export type Market = {
   services: [string, Service][];
@@ -11,30 +12,45 @@ export type Market = {
   /** The seller's commitments, newest first. */
   sellerCommitments: Commitment[];
   record: TrackRecord | null;
+  memeRecord: MemeRecord | null;
+  /** Newest first. */
+  jobs: Job[];
+  jobCount: number;
+  pools: Pool[];
+  poolCount: number;
+  /** On-chain delivery record of every seller that has won or bid on a job shown. */
+  sellers: [string, SellerStats][];
   loadedAt: Date;
 };
 
-async function loadRecord(): Promise<TrackRecord | null> {
+async function loadJson<T>(file: string): Promise<T | null> {
   try {
-    const res = await fetch(`${BASE_PATH}/track-record.json`, { cache: "no-store" });
-    return res.ok ? ((await res.json()) as TrackRecord) : null;
+    const res = await fetch(`${BASE_PATH}/${file}`, { cache: "no-store" });
+    return res.ok ? ((await res.json()) as T) : null;
   } catch {
     return null;
   }
 }
 
 export async function loadMarket(): Promise<Market> {
-  const [services, receiptCount, commitmentCount, record] = await Promise.all([
+  const [services, receiptCount, commitmentCount, jobCount, poolCount, record, memeRecord] = await Promise.all([
     view<[string, Service][]>("list_services"),
     view<number>("receipt_count"),
     view<number>("commitment_count"),
-    loadRecord(),
+    view<number>("job_count"),
+    view<number>("pool_count"),
+    loadJson<TrackRecord>("track-record.json"),
+    loadJson<MemeRecord>("meme-record.json"),
   ]);
   const last = 25;
-  const [receipts, commitments] = await Promise.all([
+  const [receipts, commitments, jobs, pools] = await Promise.all([
     view<Receipt[]>("get_receipts", { from: Math.max(0, receiptCount - last), limit: last }),
     view<Commitment[]>("get_commitments", { from: 0, limit: commitmentCount }),
+    view<Job[]>("get_jobs", { from: Math.max(0, jobCount - last), limit: last }),
+    view<Pool[]>("get_pools", { from: Math.max(0, poolCount - 10), limit: 10 }),
   ]);
+  const sellerIds = [...new Set(jobs.map((j) => j.winner).filter((w): w is string => !!w))];
+  const stats = await Promise.all(sellerIds.map((s) => view<SellerStats>("get_seller_stats", { seller: s })));
   const seller = record?.committer || SELLER;
   return {
     services,
@@ -43,6 +59,12 @@ export async function loadMarket(): Promise<Market> {
     receipts: [...receipts].reverse(),
     sellerCommitments: commitments.filter((c) => c.committer === seller).reverse(),
     record,
+    memeRecord,
+    jobs: [...jobs].reverse(),
+    jobCount,
+    pools: [...pools].reverse(),
+    poolCount,
+    sellers: sellerIds.map((s, i) => [s, stats[i]] as [string, SellerStats]).sort((a, b) => b[1].delivered - a[1].delivered),
     loadedAt: new Date(),
   };
 }

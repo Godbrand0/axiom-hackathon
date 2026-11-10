@@ -232,10 +232,17 @@ pub async fn run(as_account: Option<&str>, cmd: MemeCmd) -> Result<()> {
             let seller = as_account.map(str::to_string).or_else(|| std::env::var("NEAR_ACCOUNT_ID").ok()).context("pass --as <seller>")?;
             let all = MemeLedger::open(&db)?.all()?;
             let entries = published(&all, Utc::now());
+            let active = all.iter().filter(|s| s.committed_at.is_some()).count() - entries.len();
+            let contract = near::contract_id()?;
+            // Outcomes come from the same code a buyer's `axiom meme verify` runs: on-chain commitment time, then
+            // public candles from the first full hour after it. The site re-checks hashes and times itself.
+            let near = Near::from_env();
+            let v = verify(&near, &contract, &seller, entries.clone(), &data).await?;
+            let outcomes: Vec<Value> = v.rows.iter().map(|r| json!({"hash": r.signal.hash(), "outcome": r.outcome})).collect();
             let body = json!({
-                "seller": seller, "committer": seller, "contract": near::contract_id()?, "network": Near::from_env().network,
-                "exported_at": Utc::now(), "entries": entries,
-                "active_signals": all.iter().filter(|s| s.committed_at.is_some()).count() - entries.len(),
+                "seller": seller, "committer": seller, "contract": contract, "network": near.network,
+                "exported_at": Utc::now(), "entries": entries, "outcomes": outcomes,
+                "active_signals": active, "unrevealed": v.unrevealed,
             });
             std::fs::write(&out, serde_json::to_string_pretty(&body)?)?;
             println!("Wrote {} published memecoin signal(s) to {out}", entries.len());

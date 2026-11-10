@@ -15,6 +15,9 @@ import {
   view,
 } from "@/lib/near";
 import { labelDate, useMarket } from "@/lib/useMarket";
+import { isMemeCommitment } from "@/lib/meme";
+import MemePanel from "@/components/MemePanel";
+import { JobsPanel, PoolsPanel, ReputationPanel } from "@/components/JobsPanel";
 
 type Row = { e: RecordEntry; hash?: string; check?: Check; c?: Commitment | null; err?: string };
 
@@ -59,7 +62,7 @@ export default function MarketPage() {
 
   const publishedHashes = useMemo(() => new Set(rows.map((r) => r.hash).filter(Boolean)), [rows]);
   const allChecked = rows.every((r) => r.check || r.err);
-  const sealed = (data?.sellerCommitments ?? []).filter((c) => allChecked && !publishedHashes.has(c.hash));
+  const sealed = (data?.sellerCommitments ?? []).filter((c) => allChecked && !isMemeCommitment(c) && !publishedHashes.has(c.hash));
 
   const onTime = rows.filter((r) => r.check === "ontime");
   const closed = onTime.filter((r) => r.e.ret !== null);
@@ -101,7 +104,7 @@ export default function MarketPage() {
       <div className="panel">
         <div className="panel-head">
           <div>
-            <h2 className="h3">Axiom&apos;s track record</h2>
+            <h2 className="h3">Stock signals: Axiom&apos;s track record</h2>
             <p className="muted small">
               Published signals (entry already known) with the check your browser just ran, followed by sealed signals: committed
               on-chain, contents for sale until the open.
@@ -208,6 +211,15 @@ export default function MarketPage() {
         {data && !data.record && (
           <p className="muted small">No published record file found (track-record.json); showing on-chain commitments only.</p>
         )}
+      </div>
+
+      <MemePanel data={data} />
+
+      <JobsPanel data={data} />
+
+      <div className="grid-2">
+        <ReputationPanel data={data} />
+        <PoolsPanel data={data} />
       </div>
 
       {/* ---------------- services ---------------- */}

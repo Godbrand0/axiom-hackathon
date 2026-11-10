@@ -193,7 +193,7 @@ An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on
 
 ## Website
 
-[web/](web/) is a Next.js static site with a landing page, a live market page and docs. It reads the contract straight from the browser and **re-hashes Axiom's published track record itself**, so the page proves the record rather than just displaying it. Run it with `cd web && npm install && npm run dev`, or deploy it with the GitHub Pages workflow in `.github/workflows/pages.yml`. Refresh its data with `axiom near export-record --as <seller>` after each scan.
+[web/](web/) is a Next.js static site with a landing page, a live market page and docs. It reads the contract straight from the browser and **re-hashes Axiom's published track record itself**, so the page proves the record rather than just displaying it. The market page also shows memecoin signals (published ones re-hashed in the browser, sealed ones straight from the chain), the jobs board, each seller's on-chain reputation, and group purchases. Run it with `cd web && npm install && npm run dev`, or deploy it with the GitHub Pages workflow in `.github/workflows/pages.yml`. Refresh its data with `axiom near export-record --as <seller>` and `axiom meme export-record --as <seller>` after each scan.
 
 ## Pieces
 

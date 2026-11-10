@@ -14,7 +14,10 @@ The track record comes from `public/track-record.json`. Refresh it after each sc
 
 ```bash
 axiom near export-record --as <seller account>   # from the repo root; writes web/public/track-record.json
+axiom meme export-record --as <seller account>   # writes web/public/meme-record.json (with outcomes from public candles)
 ```
+
+Jobs, seller reputation and group purchases need no export: the market page reads them from the contract.
 
 Build-time settings (all optional): `NEXT_PUBLIC_AXIOM_PAY_CONTRACT`, `NEXT_PUBLIC_AXIOM_SELLER`, `NEXT_PUBLIC_NEAR_NETWORK`,
 `NEXT_PUBLIC_NEAR_RPC_URL`, `NEXT_PUBLIC_REPO_URL`, `NEXT_PUBLIC_BASE_PATH` (set automatically by the GitHub Pages workflow in

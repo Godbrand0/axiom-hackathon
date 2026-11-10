@@ -800,3 +800,7 @@ th.num-cell {
     font-size: 30px;
   }
 }
+
+.grid-2 > .panel {
+  min-width: 0;
+}

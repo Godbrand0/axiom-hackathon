@@ -129,3 +129,35 @@ export function fmtDuration(ms: number): string {
 }
 
 export const fmtUtc = (d: Date) => d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+
+export type JobStatus = "Open" | "Awarded" | "Delivered" | "Disputed" | "Cancelled";
+export type Job = {
+  id: number;
+  buyer: string;
+  owner: string;
+  topic: string;
+  max_price: string;
+  deadline_ns: number;
+  status: JobStatus;
+  winner: string | null;
+  price: string;
+  receipt: number | null;
+  bids: number;
+};
+export type SellerStats = { awarded: number; delivered: number; disputed: number; earned: string };
+export type PoolStatus = "Open" | "Filled" | "Refunded";
+export type Pool = {
+  id: number;
+  service_id: string;
+  provider: string;
+  request_hash: string;
+  memo: string;
+  price: string;
+  shares: number;
+  members: string[];
+  owners: string[];
+  paid: string[];
+  deadline_ns: number;
+  status: PoolStatus;
+  receipt: number | null;
+};
