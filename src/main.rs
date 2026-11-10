@@ -214,6 +214,11 @@ enum NearCmd {
     },
     /// Agent: commit every ledger signal that is not on-chain yet (late ones will verify as LATE).
     CommitSignals,
+    /// Seller: write the free track record (signals whose entry is known) to a JSON file, e.g. for the website.
+    ExportRecord {
+        #[arg(long, default_value = "web/public/track-record.json")]
+        out: String,
+    },
     /// Check every local ledger signal against the --as account's on-chain commitments.
     Verify,
 }
@@ -520,7 +525,8 @@ async fn scan(
         store.insert(&sig, &path.to_string_lossy())?;
         if let Some(ctx) = &near_ctx {
             let hash = sha256_hex(&near::signal_line(&sig.symbol, &sig.setup, sig.as_of, sig.entry, sig.stop, sig.target, sig.max_hold_days));
-            let label = format!("{} {} {}", sig.symbol, sig.setup, sig.as_of);
+            // Labels are public immediately: name only the session, never the symbol or setup being sold.
+            let label = format!("axiom-signal/v1 {}", sig.as_of);
             match near::commit_signal(ctx, &hash, &label).await {
                 Ok(tx) => {
                     let link = ctx.near.explorer_tx(&tx);
@@ -1264,11 +1270,31 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                 if !found.is_null() {
                     continue;
                 }
-                let tx = near::commit_signal(&ctx, &hash, &format!("{} {} {}", s.symbol, s.setup, s.as_of)).await?;
+                let tx = near::commit_signal(&ctx, &hash, &format!("axiom-signal/v1 {}", s.as_of)).await?;
                 println!("{} {} {}: {}", s.symbol, s.setup, s.as_of, ctx.near.explorer_tx(&tx));
                 n += 1;
             }
             println!("Committed {n} signal(s) as {}.", ctx.signer.account_id);
+        }
+        NearCmd::ExportRecord { out } => {
+            let seller = me()?;
+            let now = Utc::now();
+            let all = Store::open(&db_path())?.all()?;
+            let entries: Vec<near::RecordEntry> =
+                all.iter().filter(|s| near::entry_known_at(s.as_of, s.fill_date) <= now).map(near::RecordEntry::from).collect();
+            let body = json!({
+                "seller": seller,
+                "committer": seller,
+                "contract": contract()?,
+                "network": near.network,
+                "generated_at": now,
+                "entries": entries,
+            });
+            if let Some(dir) = std::path::Path::new(&out).parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&out, serde_json::to_string_pretty(&body)?)?;
+            println!("Wrote {} published signal(s) to {out} ({} still fresh, not published).", entries.len(), all.len() - entries.len());
         }
         NearCmd::Verify => {
             let store = Store::open(&db_path())?;

@@ -123,6 +123,10 @@ These flows were run against it on 10 Nov 2026:
 
 An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on-chain cap enforcement, price-change re-approval, receipt replay, and ledger-tamper detection. Those behaviours carry over and are covered by the unit tests.
 
+## Website
+
+[web/](web/) is a Next.js static site with a landing page, a live market page and docs. It reads the contract straight from the browser and **re-hashes Axiom's published track record itself**, so the page proves the record rather than just displaying it. Run it with `cd web && npm install && npm run dev`, or deploy it with the GitHub Pages workflow in `.github/workflows/pages.yml`. Refresh its data with `axiom near export-record --as <seller>` after each scan.
+
 ## Pieces
 
 | Piece | Where |
@@ -133,7 +137,7 @@ An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on
 | Seller server (signals, reports, SEC evidence, free track record) | [src/near/provider.rs](src/near/provider.rs) |
 | CLI (`axiom near …`) and the `scan --near` hook | [src/main.rs](src/main.rs) |
 
-`axiom near` commands: `create-account`, `deploy [--no-init]`, `status`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`.
+`axiom near` commands: `create-account`, `deploy [--no-init]`, `status`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`, `export-record`.
 
 ## Tests
 
