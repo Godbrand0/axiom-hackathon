@@ -32,6 +32,7 @@ use crate::data::sec::{self, Sec};
 use crate::indicators::Indicators;
 use crate::models::{Bar, Evidence, EvidenceKind, Signal, Stance};
 use crate::setups::Setup;
+use crate::near::client::sha256_hex;
 use crate::store::Store;
 
 const BENCHMARK: &str = "SPY";
@@ -128,69 +129,92 @@ enum Cmd {
 enum NearCmd {
     /// Create a funded testnet account through the NEAR faucet and save its key.
     CreateAccount { account: String },
-    /// Deploy the Axiom Pay contract to the --as account and initialise it, in one transaction.
+    /// Deploy the Axiom Pay marketplace contract to the --as account (and initialise it).
     Deploy {
         #[arg(long, default_value = "contract/target/near/axiom_pay.wasm")]
         wasm: String,
-        /// Human who funds the budget and sets the policy.
+        /// Upgrade the code only, keeping the existing state.
         #[arg(long)]
-        owner: Option<String>,
-        /// Account Axiom signs payments and commitments with.
+        no_init: bool,
+    },
+    /// Marketplace overview: services, prices, sales; plus the --as account's wallet if it has one.
+    Status,
+    /// Owner: open a wallet for an agent, funded with --budget NEAR, with spending caps.
+    OpenWallet {
         #[arg(long)]
-        agent: Option<String>,
+        agent: String,
+        #[arg(long)]
+        budget: String,
         #[arg(long, default_value = "0.05")]
         max_per_call: String,
         #[arg(long, default_value = "0.5")]
         daily_cap: String,
-        /// Upgrade the code only, keeping the existing state (owner/agent/caps flags are ignored).
-        #[arg(long)]
-        no_init: bool,
     },
-    /// Policy, budget, spend today, services, balances.
-    Status,
-    /// Owner: add NEAR to the agent's budget.
+    /// Owner: add NEAR to your wallet's budget.
     Fund { amount: String },
-    /// Owner: change the per-call and daily spending caps (in NEAR).
+    /// Owner: change your wallet's per-call and daily caps (in NEAR).
     Policy {
         #[arg(long)]
         max_per_call: String,
         #[arg(long)]
         daily_cap: String,
     },
-    /// Provider: register or reprice a service (pays its own storage, excess refunded).
+    /// Seller: register or reprice a service (pays its own storage, excess refunded).
     Register {
-        #[arg(long, default_value = near::SEC_SERVICE)]
+        #[arg(long)]
         service: String,
         #[arg(long)]
         price: String,
-        #[arg(long, default_value = "Recent SEC filings for a ticker with 8-K red-flag item codes")]
-        description: String,
+        #[arg(long)]
+        description: Option<String>,
     },
-    /// Owner: allowlist a service at its current on-chain price.
+    /// Owner: let your agent pay a service at its current on-chain price.
     Approve { service: String },
-    /// Owner: remove a service from the allowlist.
+    /// Owner: stop your agent paying a service.
     Revoke { service: String },
-    /// Recent payment receipts.
+    /// Recent payment receipts across the marketplace.
     Receipts {
         #[arg(long, default_value_t = 20)]
         last: u64,
     },
-    /// Provider: sell SEC red-flag evidence over HTTP, paid per call through Axiom Pay.
+    /// Seller: serve every service the --as account registered (Axiom research and/or SEC evidence).
     Serve {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
-    /// Agent: buy one symbol's recent filings from a provider (pays on-chain, then redeems the receipt).
+    /// Agent: buy one symbol's recent SEC filings from an evidence seller.
     Buy {
         symbol: String,
-        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        #[arg(long, default_value = "http://127.0.0.1:8788")]
         provider: String,
         #[arg(long, default_value_t = 30)]
         days: i64,
     },
+    /// Buyer agent: verify a seller's on-chain track record, and buy its latest signals only if it passes.
+    Shop {
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        seller: String,
+        /// Session to buy (default: the seller's latest).
+        #[arg(long)]
+        date: Option<NaiveDate>,
+        /// Refuse to buy unless at least this many past signals were committed before their entry.
+        #[arg(long, default_value_t = 1)]
+        min_verified: usize,
+        /// Refuse to buy if more than this share of published signals are late or uncommitted.
+        #[arg(long, default_value_t = 0.0)]
+        max_unverified_share: f64,
+        /// Also buy the full report for each signal.
+        #[arg(long)]
+        reports: bool,
+    },
+    /// Check a seller's published track record against its on-chain commitments (free; no key needed).
+    CheckSeller {
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        seller: String,
+    },
     /// Agent: commit every ledger signal that is not on-chain yet (late ones will verify as LATE).
     CommitSignals,
-    /// Check every ledger signal against its on-chain commitment and timestamp.
+    /// Check every local ledger signal against the --as account's on-chain commitments.
     Verify,
 }
 
@@ -495,7 +519,7 @@ async fn scan(
         let path = report::write(&cfg.reports_dir, &sig, &md)?;
         store.insert(&sig, &path.to_string_lossy())?;
         if let Some(ctx) = &near_ctx {
-            let hash = near::signal_hash(&sig);
+            let hash = sha256_hex(&near::signal_line(&sig.symbol, &sig.setup, sig.as_of, sig.entry, sig.stop, sig.target, sig.max_hold_days));
             let label = format!("{} {} {}", sig.symbol, sig.setup, sig.as_of);
             match near::commit_signal(ctx, &hash, &label).await {
                 Ok(tx) => {
@@ -1007,6 +1031,8 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
     let signer = || Signer::load(&near.network, as_account);
     let contract = near::contract_id;
     let done = |what: &str, tx: &str| println!("{what}: {}", near.explorer_tx(tx));
+    let db_path = || std::env::var("AXIOM_DB").unwrap_or_else(|_| "axiom.db".into());
+    let me = || as_account.map(str::to_string).or_else(|| std::env::var("NEAR_ACCOUNT_ID").ok()).context("pass --as <account>");
 
     match cmd {
         NearCmd::CreateAccount { account } => {
@@ -1035,57 +1061,63 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
             }
             bail!("faucet accepted the request but {account} does not exist yet; key saved to {}", path.display())
         }
-        NearCmd::Deploy { wasm, owner, agent, max_per_call, daily_cap, no_init } => {
+        NearCmd::Deploy { wasm, no_init } => {
             let s = signer()?;
             let code = std::fs::read(&wasm).with_context(|| format!("reading {wasm} (build it with contract/build.sh)"))?;
-            if no_init {
-                let r = near.send(&s, &s.account_id, vec![Action::Deploy(code)]).await?;
-                done(&format!("Upgraded code on {}", s.account_id), &r.hash);
-                return Ok(());
+            let mut actions = vec![Action::Deploy(code)];
+            if !no_init {
+                actions.push(Action::Call { method: "new".into(), args: json!({}), gas: 100 * TGAS, deposit: 0 });
             }
-            let (Some(owner), Some(agent)) = (owner, agent) else { bail!("--owner and --agent are required (or pass --no-init)") };
-            let args = json!({
-                "owner": owner, "agent": agent,
-                "max_per_call": parse_near(&max_per_call)?.to_string(),
-                "daily_cap": parse_near(&daily_cap)?.to_string(),
-            });
-            let r = near
-                .send(&s, &s.account_id, vec![Action::Deploy(code), Action::Call { method: "new".into(), args, gas: 100 * TGAS, deposit: 0 }])
-                .await?;
+            let r = near.send(&s, &s.account_id, actions).await?;
             done(&format!("Deployed Axiom Pay to {}", s.account_id), &r.hash);
             println!("Add to .env:  AXIOM_PAY_CONTRACT={}", s.account_id);
         }
         NearCmd::Status => {
             let c = contract()?;
-            let p = near.view(&c, "get_policy", json!({})).await?;
-            println!("Axiom Pay {c} on {}", near.network);
-            println!("  owner {}   agent {}", p["owner"].as_str().unwrap_or("?"), p["agent"].as_str().unwrap_or("?"));
-            println!(
-                "  budget {}   spent today {} of {}   max per call {}",
-                fmt_near(u128_field(&p, "budget")?),
-                fmt_near(u128_field(&p, "spent_today")?),
-                fmt_near(u128_field(&p, "daily_cap")?),
-                fmt_near(u128_field(&p, "max_per_call")?)
-            );
-            println!("  {} receipt(s), {} signal commitment(s)", p["receipts"], p["commitments"]);
-            let services = near.view(&c, "list_services", json!({})).await?;
+            let receipts = near.view(&c, "receipt_count", json!({})).await?;
+            let commitments = near.view(&c, "commitment_count", json!({})).await?;
+            println!("Axiom Pay marketplace {c} on {}: {receipts} payment(s), {commitments} commitment(s)", near.network);
             println!("Services:");
-            for pair in services.as_array().into_iter().flatten() {
+            for pair in near.view(&c, "list_services", json!({})).await?.as_array().into_iter().flatten() {
                 let (id, s) = (&pair[0], &pair[1]);
                 println!(
-                    "  {:<16} {:>12}/call  {}  provider {}  calls {}  earned {}",
+                    "  {:<14} {:>10}/call  seller {:<28} sold {:>3}  earned {}",
                     id.as_str().unwrap_or("?"),
                     fmt_near(u128_field(s, "price")?),
-                    if s["approved"].as_bool() == Some(true) { "approved" } else { "NOT approved" },
                     s["provider"].as_str().unwrap_or("?"),
                     s["calls"],
                     fmt_near(u128_field(s, "earned")?)
                 );
             }
+            if let Ok(acct) = me() {
+                let mut w = near.view(&c, "get_wallet", json!({"owner": acct})).await?;
+                if w.is_null() {
+                    w = near.view(&c, "get_wallet_of_agent", json!({"agent": acct})).await?;
+                }
+                if !w.is_null() {
+                    println!(
+                        "Wallet of {} (agent {}): budget {}, spent today {} of {}, max {}/call, {} payment(s)",
+                        w["owner"].as_str().unwrap_or("?"),
+                        w["agent"].as_str().unwrap_or("?"),
+                        fmt_near(u128_field(&w, "budget")?),
+                        fmt_near(u128_field(&w, "spent_today")?),
+                        fmt_near(u128_field(&w, "daily_cap")?),
+                        fmt_near(u128_field(&w, "max_per_call")?),
+                        w["payments"]
+                    );
+                }
+            }
+        }
+        NearCmd::OpenWallet { agent, budget, max_per_call, daily_cap } => {
+            let args = json!({"agent": agent, "max_per_call": parse_near(&max_per_call)?.to_string(), "daily_cap": parse_near(&daily_cap)?.to_string()});
+            let r = near.call(&signer()?, &contract()?, "open_wallet", args, parse_near(&budget)?).await?;
+            let b = r.value.as_ref().map(|w| u128_field(w, "budget")).transpose()?.unwrap_or(0);
+            done(&format!("Wallet open for agent {agent}, budget {} after storage", fmt_near(b)), &r.hash);
         }
         NearCmd::Fund { amount } => {
             let r = near.call(&signer()?, &contract()?, "deposit", json!({}), parse_near(&amount)?).await?;
-            done(&format!("Budget is now {}", fmt_near(r.value.as_ref().and_then(|v| v.as_str()).unwrap_or("0").parse()?)), &r.hash);
+            let b: u128 = r.value.as_ref().and_then(|v| v.as_str()).unwrap_or("0").parse()?;
+            done(&format!("Budget is now {}", fmt_near(b)), &r.hash);
         }
         NearCmd::Policy { max_per_call, daily_cap } => {
             let args = json!({"max_per_call": parse_near(&max_per_call)?.to_string(), "daily_cap": parse_near(&daily_cap)?.to_string()});
@@ -1093,10 +1125,18 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
             done("Policy updated", &r.hash);
         }
         NearCmd::Register { service, price, description } => {
+            let description = description.unwrap_or_else(|| {
+                match service.as_str() {
+                    near::SIGNALS_SERVICE => "Axiom: one session's fresh signals (entry/stop/target), committed on-chain before the open",
+                    near::REPORT_SERVICE => "Axiom: full cited bull/bear research report for one symbol and session",
+                    near::SEC_SERVICE => "Recent SEC filings for a ticker with 8-K red-flag item codes",
+                    _ => "",
+                }
+                .to_string()
+            });
             let args = json!({"service_id": service, "price": parse_near(&price)?.to_string(), "description": description});
-            // 0.01 NEAR covers ~1 kB of storage; the contract refunds what it does not use.
             let r = near.call(&signer()?, &contract()?, "register_service", args, parse_near("0.01")?).await?;
-            done(&format!("Registered {service} at {price} NEAR/call (needs owner approval)"), &r.hash);
+            done(&format!("Registered {service} at {price} NEAR/call"), &r.hash);
         }
         NearCmd::Approve { service } => {
             let c = contract()?;
@@ -1104,7 +1144,7 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
             if svc.is_null() {
                 bail!("no service {service} on {c}");
             }
-            println!("{service}: {} per call, provider {}", fmt_near(u128_field(&svc, "price")?), svc["provider"]);
+            println!("{service}: {} per call, seller {}", fmt_near(u128_field(&svc, "price")?), svc["provider"]);
             let r = near.call(&signer()?, &c, "approve_service", json!({"service_id": service, "price": svc["price"]}), 0).await?;
             done("Approved", &r.hash);
         }
@@ -1114,19 +1154,21 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
         }
         NearCmd::Receipts { last } => {
             let c = contract()?;
-            let total = near.view(&c, "get_policy", json!({})).await?["receipts"].as_u64().unwrap_or(0);
+            let total = near.view(&c, "receipt_count", json!({})).await?.as_u64().unwrap_or(0);
             let rs = near.view(&c, "get_receipts", json!({"from": total.saturating_sub(last), "limit": last})).await?;
             for r in rs.as_array().into_iter().flatten() {
                 let t = chrono::DateTime::<Utc>::from_timestamp((r["timestamp_ns"].as_u64().unwrap_or(0) / 1_000_000_000) as i64, 0).unwrap_or_default();
+                let h = r["request_hash"].as_str().unwrap_or("");
                 println!(
-                    "#{:<4} {} {:<14} {:>12} -> {:<24} {}  req {}…",
+                    "#{:<4} {} {:<14} {:>10}  {} -> {}  {}  req {}…",
                     r["id"],
                     t.format("%Y-%m-%d %H:%M"),
                     r["service_id"].as_str().unwrap_or("?"),
                     fmt_near(u128_field(r, "amount")?),
+                    r["payer"].as_str().unwrap_or("?"),
                     r["provider"].as_str().unwrap_or("?"),
                     r["memo"].as_str().unwrap_or(""),
-                    &r["request_hash"].as_str().unwrap_or("")[..12.min(r["request_hash"].as_str().unwrap_or("").len())]
+                    &h[..h.len().min(12)]
                 );
             }
             if total == 0 {
@@ -1134,12 +1176,8 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
             }
         }
         NearCmd::Serve { port } => {
-            let provider = as_account
-                .map(str::to_string)
-                .or_else(|| std::env::var("NEAR_ACCOUNT_ID").ok())
-                .context("pass --as <provider account>")?;
-            let ua = std::env::var("SEC_USER_AGENT").context("SEC_USER_AGENT is required to fetch EDGAR")?;
-            near::provider::serve(port, provider, contract()?, &ua).await?;
+            let ua = std::env::var("SEC_USER_AGENT").ok().filter(|s| !s.trim().is_empty());
+            near::provider::serve(port, me()?, contract()?, db_path(), ua).await?;
         }
         NearCmd::Buy { symbol, provider, days } => {
             let ctx = near::Ctx::from_env(as_account)?;
@@ -1151,25 +1189,115 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                 println!("  {:<6} {} {:<12}{} {}", f.form, f.filed, f.items, if red { " RED FLAG" } else { "" }, f.url);
             }
         }
+        NearCmd::CheckSeller { seller } => {
+            check_seller(&near, &seller).await?;
+        }
+        NearCmd::Shop { seller, date, min_verified, max_unverified_share, reports } => {
+            let ctx = near::Ctx::from_env(as_account)?;
+            let (info, v) = check_seller(&near, &seller).await?;
+            if info["contract"].as_str() != Some(ctx.contract.as_str()) {
+                bail!("seller settles on {}, our wallet is on {}", info["contract"], ctx.contract);
+            }
+            // The buying decision: only verified, on-time history counts.
+            let on_time = v.count(near::Check::OnTime);
+            let unverified = v.rows.len() - on_time;
+            let share = if v.rows.is_empty() { 0.0 } else { unverified as f64 / v.rows.len() as f64 };
+            println!();
+            if on_time < min_verified {
+                bail!("DECISION: not buying. Only {on_time} signal(s) verified on-chain; policy requires {min_verified}.");
+            }
+            if share > max_unverified_share {
+                bail!("DECISION: not buying. {:.0}% of published signals are late or uncommitted; policy allows {:.0}%.", share * 100.0, max_unverified_share * 100.0);
+            }
+            let date = match date.or_else(|| info["latest_signal_date"].as_str().and_then(|d| d.parse().ok())) {
+                Some(d) => d,
+                None => bail!("seller has no signals to sell"),
+            };
+            println!("DECISION: buying. {on_time} signal(s) verified before entry, {unverified} unverified. Buying signals for {date}.");
+            let d = date.to_string();
+            let bought = near::purchase(&ctx, &seller, near::SIGNALS_SERVICE, &[("date", d.clone())], &[&d]).await?;
+            let sigs = bought["signals"].as_array().cloned().unwrap_or_default();
+            println!("\n{} signal(s) for {date}:", sigs.len());
+            for s in &sigs {
+                // A fresh signal should already be committed by the seller: check before trusting it.
+                let committed = !near
+                    .view(&ctx.contract, "find_commitment", json!({"committer": info["seller"], "hash": s["commitment_hash"]}))
+                    .await?
+                    .is_null();
+                println!(
+                    "  {:<6} {:<16} entry ~{:.2} stop {:.2} target {:.2} R:R {:.1}  {}",
+                    s["symbol"].as_str().unwrap_or("?"),
+                    s["setup"].as_str().unwrap_or("?"),
+                    s["entry"].as_f64().unwrap_or(0.0),
+                    s["stop"].as_f64().unwrap_or(0.0),
+                    s["target"].as_f64().unwrap_or(0.0),
+                    s["risk_reward"].as_f64().unwrap_or(0.0),
+                    if committed { "committed on-chain" } else { "NOT committed: treat as unverified" }
+                );
+            }
+            if reports {
+                let dir = std::path::Path::new("purchased").join(&d);
+                std::fs::create_dir_all(&dir)?;
+                for s in &sigs {
+                    let sym = s["symbol"].as_str().unwrap_or_default().to_string();
+                    let r = near.view(&ctx.contract, "get_service", json!({"service_id": near::REPORT_SERVICE})).await?;
+                    if r.is_null() {
+                        println!("  (seller does not sell reports)");
+                        break;
+                    }
+                    let rep = near::purchase(&ctx, &seller, near::REPORT_SERVICE, &[("symbol", sym.clone()), ("date", d.clone())], &[&sym, &d]).await?;
+                    for (i, r) in rep["reports"].as_array().into_iter().flatten().enumerate() {
+                        let path = dir.join(format!("{sym}-{}.md", r["setup"].as_str().unwrap_or(&i.to_string())));
+                        std::fs::write(&path, r["markdown"].as_str().unwrap_or_default())?;
+                        println!("  report saved: {}", path.display());
+                    }
+                }
+            }
+        }
         NearCmd::CommitSignals => {
             let ctx = near::Ctx::from_env(as_account)?;
-            let store = Store::open(&std::env::var("AXIOM_DB").unwrap_or_else(|_| "axiom.db".into()))?;
+            let store = Store::open(&db_path())?;
             let mut n = 0;
             for s in store.all()? {
                 let hash = near::stored_hash(&s);
-                if !ctx.near.view(&ctx.contract, "find_commitment", json!({"hash": hash})).await?.is_null() {
+                let found = ctx.near.view(&ctx.contract, "find_commitment", json!({"committer": ctx.signer.account_id, "hash": hash})).await?;
+                if !found.is_null() {
                     continue;
                 }
                 let tx = near::commit_signal(&ctx, &hash, &format!("{} {} {}", s.symbol, s.setup, s.as_of)).await?;
                 println!("{} {} {}: {}", s.symbol, s.setup, s.as_of, ctx.near.explorer_tx(&tx));
                 n += 1;
             }
-            println!("Committed {n} signal(s).");
+            println!("Committed {n} signal(s) as {}.", ctx.signer.account_id);
         }
         NearCmd::Verify => {
-            let store = Store::open(&std::env::var("AXIOM_DB").unwrap_or_else(|_| "axiom.db".into()))?;
-            near::verify(&near, &contract()?, &store.all()?).await?;
+            let store = Store::open(&db_path())?;
+            let entries: Vec<near::RecordEntry> = store.all()?.iter().map(near::RecordEntry::from).collect();
+            if entries.is_empty() {
+                println!("No signals in the ledger yet. Run `axiom scan --near` first.");
+                return Ok(());
+            }
+            let v = near::verify_entries(&near, &contract()?, &me()?, entries).await?;
+            near::print_verified(&v);
         }
     }
     Ok(())
+}
+
+/// Fetches a seller's info and free track record, and verifies every entry against its on-chain commitments.
+async fn check_seller(near: &near::client::Near, url: &str) -> Result<(serde_json::Value, near::Verified)> {
+    let http = reqwest::Client::new();
+    let base = url.trim_end_matches('/');
+    let info: serde_json::Value = http.get(format!("{base}/")).send().await.with_context(|| format!("seller {base}"))?.json().await?;
+    let record: serde_json::Value = http.get(format!("{base}/v1/track-record")).send().await?.json().await?;
+    let seller = info["seller"].as_str().context("seller info has no account")?;
+    let contract = info["contract"].as_str().context("seller info has no contract")?;
+    if record["committer"].as_str() != Some(seller) {
+        bail!("track record is committed by {}, not the seller {seller}", record["committer"]);
+    }
+    let entries: Vec<near::RecordEntry> = serde_json::from_value(record["entries"].clone()).context("bad track record")?;
+    println!("Seller {seller} on {contract}: {} published signal(s). Checking each on-chain...\n", entries.len());
+    let v = near::verify_entries(near, contract, seller, entries).await?;
+    near::print_verified(&v);
+    Ok((info, v))
 }

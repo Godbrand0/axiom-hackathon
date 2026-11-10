@@ -117,6 +117,15 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// (setup, report path) for every signal on `symbol` at `as_of`.
+    pub fn report_paths(&self, symbol: &str, as_of: NaiveDate) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT setup, report_path FROM signals WHERE symbol=?1 AND as_of=?2 AND report_path IS NOT NULL ORDER BY setup",
+        )?;
+        let rows = stmt.query_map(params![symbol, as_of.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn update(&self, s: &StoredSignal) -> Result<()> {
         self.conn.execute(
             "UPDATE signals SET status=?2, fill_date=?3, fill_price=?4, exit_date=?5, exit_price=?6, ret=?7 WHERE id=?1",

@@ -1,150 +1,160 @@
-# Axiom Pay: the NEAR layer of Axiom
+# Axiom Pay: a market where AI research agents sell to other agents
 
 Built at **NEAR HACKATHON** (Nov 2026). Tracks: **Agent Economy** (primary), **AI Swarms**, **Open Innovation**.
 
-Axiom is a research agent for US stocks (see [README.md](README.md)). Axiom Pay adds two things an autonomous research agent needs before anyone should trust it with money or with a track record:
+Axiom is a research agent for US stocks (see [README.md](README.md)). Axiom Pay is a NEAR smart contract plus Rust tooling that lets Axiom **sell** its research to other AI agents, per call, and lets buyer agents **check whether the research is any good before they pay**.
 
-1. **A spending policy it cannot break.** A human owner funds a budget on NEAR and sets the limits: which services may be paid, the most per call, and the most per day. The agent buys evidence from other agents per call, inside those limits. Each payment leaves an on-chain receipt bound to the hash of the exact request.
-2. **A track record it cannot rewrite.** Every signal Axiom produces is hashed and committed on-chain **before the next market open**, so before its outcome can be known. Anyone can recompute the hash from the ledger and check when it was committed. A signal committed after entry is reported as `LATE`; a signal that was never committed is reported as `NOT COMMITTED`. Backtests can be overfit; a ledger of commitments made before the outcome cannot.
+## The problem
 
-## Pieces
+Anyone can sell trade signals, and a buyer can't tell a good seller from one that deletes its losing calls. An AI agent buying research has the same problem, plus another: the human behind it needs to cap what it can spend.
 
-| Piece | Where | What it does |
-|---|---|---|
-| Smart contract | [contract/src/lib.rs](contract/src/lib.rs) | Owner/agent roles, budget, per-call and daily caps, service registry with owner allowlist, payment receipts, signal commitments. 11 unit tests. |
-| NEAR client | [src/near/client.rs](src/near/client.rs) | JSON-RPC views, ed25519 keys, Borsh-encoded signed transactions, deploy. Self-contained: no near-cli needed. |
-| Buyer + commitments | [src/near/mod.rs](src/near/mod.rs) | x402-style purchase (ask → `402` terms → check → pay → redeem), signal hashing, `verify`. |
-| Provider agent | [src/near/provider.rs](src/near/provider.rs) | HTTP service selling SEC filings with 8-K red-flag codes. Serves a request only against a valid, unexpired, unredeemed receipt for that exact request. |
-| Pipeline hook | [src/main.rs](src/main.rs) `scan --near` | Buys filing evidence through Axiom Pay (when `AXIOM_SEC_PROVIDER_URL` is set) and commits each new signal. |
+## What Axiom Pay does
 
-## How a paid call works
+| Who | What they do on-chain |
+|---|---|
+| **Seller** (Axiom) | Registers priced services: `axiom-signals` (a session's fresh signals, 0.02 NEAR) and `axiom-report` (a full cited report, 0.05 NEAR). **Commits the hash of every signal before the next market open.** |
+| **Human owner** | Opens a wallet for their agent: a budget, a max per call, a daily cap, and approved services at approved prices. |
+| **Buyer agent** | Reads the seller's free track record, **verifies each past signal against the chain**, decides by its own rules whether to buy, then pays inside the owner's limits and redeems the receipt. |
+| **Evidence seller** | Anyone can sell inputs too. Here a second agent sells SEC filings with red-flag tags (0.01 NEAR), and Axiom buys them for its own research. |
+
+The result is a small agent economy: the buyer bot pays Axiom, Axiom pays the evidence seller, every payment has an on-chain receipt bound to the exact request, and every prediction has an on-chain timestamp.
+
+### Why the track record can be trusted
+
+1. When Axiom produces a signal, it computes `sha256("axiom-signal/v1|SYMBOL|setup|date|entry|stop|target|max_hold")` and calls `commit` before the next open (13:30 UTC on the next weekday).
+2. Once the entry is known, the signal becomes free at the seller's `/v1/track-record`, with all the fields needed to recompute the hash.
+3. The buyer recomputes each hash and looks it up on-chain **under the seller's account**. If the record was committed before entry, it's `ok`. If it was committed after entry, it's `LATE`. If it was never committed, or a field was edited afterwards, it's `NOT COMMITTED`.
+4. Fresh signals (entry not yet known) are what's for sale. **Buyers pay for freshness; the history is free and checkable.**
+
+What this proves: *when* each signal existed and that it wasn't edited. What it doesn't prove: the returns the seller reports (that's the seller's own paper-trade accounting; a buyer with price data can recompute them), or that the seller never withheld a signal entirely.
+
+### How a paid call works (x402-style)
 
 ```
-Axiom agent                         Provider agent                 Axiom Pay contract (NEAR)
-    | GET /v1/sec-red-flags?symbol=NVDA&since=…  |                          |
-    |------------------------------------------->|                          |
-    |   402 {contract, service_id, price, request_hash}                     |
-    |<-------------------------------------------|                          |
-    | recompute request_hash itself; check service is approved, price      |
-    |---------------------------------------------------- view get_service ->|
-    |---------------------------------- pay(service_id, request_hash, memo) ->|
-    |        contract checks: caller is agent, service approved,            |
-    |        price <= max_per_call, spent_today + price <= daily_cap,       |
-    |        price <= budget → transfers price to provider → receipt #N     |
-    | GET …&receipt=N                            |                          |
-    |------------------------------------------->| view get_receipt(N) ---->|
-    |                                            | checks provider, service,|
-    |                                            | request hash, age<15min, |
-    |                                            | not redeemed before      |
-    |               filings JSON                 |                          |
-    |<-------------------------------------------|                          |
+buyer agent                          seller                          Axiom Pay contract (NEAR)
+  GET /v1/track-record  ───────────>  past signals (free)
+  find_commitment(seller, hash) for each ──────────────────────────>  timestamps
+  decide: enough verified history?  (refuse → stop)
+  GET /v1/axiom-signals?date=D ────>  402 {contract, service, price, request_hash}
+  recompute request_hash itself; check owner approved this price ──>  get_wallet_of_agent, get_approval
+  pay(service, request_hash, memo) ────────────────────────────────>  checks approval == current price,
+                                                                      max_per_call, daily_cap, budget;
+                                                                      pays seller; stores receipt #N
+  GET …&receipt=N ─────────────────>  get_receipt(N): right seller, service, request hash,
+                                      < 15 min old, not redeemed before → serves the data
 ```
 
-What each side cannot do:
-- The agent cannot pay an unapproved service, exceed either cap, or spend more than the budget. The contract rejects it.
-- A provider cannot raise its price on an approved service: any price change clears the approval until the owner approves again.
-- A provider cannot take over another provider's service id.
-- A receipt cannot be reused for a different request, a different provider, or a second time.
+Guarantees, enforced by the contract (16 unit tests) or the seller (also tested on testnet):
+- An agent can only spend from its owner's wallet, and only on services the owner approved **at the current price**. If a seller raises its price, payment fails until the owner re-approves.
+- Per-call cap, daily cap and budget are enforced on-chain.
+- Nobody can take over another seller's service id.
+- A receipt can't be reused, can't be used for a different request, and can't be redeemed with a different seller.
+- Commitments are keyed by committer, so nobody can claim or spoof another seller's history.
+- The seller never charges for an empty answer: it checks there is data before quoting a price.
 
 ## Reproduce it (testnet, about 10 minutes)
 
-Needs Rust (`rustup`). No near-cli, no market-data keys. The SEC provider needs only `SEC_USER_AGENT`.
+Needs Rust. No near-cli and no market-data keys (the ledger ships empty, so step 5 needs one `scan`, which needs Alpaca keys; steps 1–4 and 6 don't).
 
 ```bash
-cargo build --release
-A=./target/release/axiom
-S=$RANDOM   # unique suffix for account names
+cargo build --release && ./contract/build.sh
+A=./target/release/axiom; S=$RANDOM
 
-# 1. Four funded testnet accounts from the faucet (keys go to ~/.near-credentials/testnet/)
-for r in owner agent sec pay; do $A near create-account axiom-$r-$S.testnet; done
+# 1. Accounts from the testnet faucet (keys go to ~/.near-credentials/testnet/)
+for r in market axiom owner sec buyer bot; do $A near create-account ax-$r-$S.testnet; done
+export AXIOM_PAY_CONTRACT=ax-market-$S.testnet
+$A near deploy --as ax-market-$S.testnet
 
-# 2. Build and deploy the contract (deploy + init in one transaction)
-./contract/build.sh
-$A near deploy --as axiom-pay-$S.testnet --owner axiom-owner-$S.testnet --agent axiom-agent-$S.testnet \
-  --max-per-call 0.05 --daily-cap 0.2
-export AXIOM_PAY_CONTRACT=axiom-pay-$S.testnet
+# 2. Sellers register services
+$A near register --service axiom-signals --price 0.02 --as ax-axiom-$S.testnet
+$A near register --service axiom-report  --price 0.05 --as ax-axiom-$S.testnet
+$A near register --service sec-red-flags --price 0.01 --as ax-sec-$S.testnet
 
-# 3. Owner funds the agent; provider registers; owner approves
-$A near fund 1 --as axiom-owner-$S.testnet
-$A near register --price 0.01 --as axiom-sec-$S.testnet
-$A near approve sec-red-flags --as axiom-owner-$S.testnet
-$A near status          # see: budget 1 NEAR, service approved
+# 3. Owners open wallets for their agents and approve services
+$A near open-wallet --agent ax-bot-$S.testnet --budget 1 --max-per-call 0.1 --daily-cap 0.5 --as ax-buyer-$S.testnet
+$A near approve axiom-signals --as ax-buyer-$S.testnet
+$A near approve axiom-report  --as ax-buyer-$S.testnet
+$A near open-wallet --agent ax-axiom-$S.testnet --budget 1 --as ax-owner-$S.testnet
+$A near approve sec-red-flags --as ax-owner-$S.testnet
 
-# 4. Provider agent sells evidence (separate terminal, same AXIOM_PAY_CONTRACT)
-SEC_USER_AGENT="axiom-demo you@example.com" $A near serve --as axiom-sec-$S.testnet
+# 4. Run the sellers (two terminals, same AXIOM_PAY_CONTRACT)
+$A near serve --port 8787 --as ax-axiom-$S.testnet
+SEC_USER_AGENT="axiom-demo you@example.com" $A near serve --port 8788 --as ax-sec-$S.testnet
 
-# 5. Agent buys NVDA's last 30 days of filings: pays on-chain, redeems the receipt
-$A near buy NVDA --as axiom-agent-$S.testnet
-$A near receipts        # receipt #0: 0.01 NEAR to the provider, bound to the request hash
+# 5. Axiom researches: buys SEC evidence, writes reports, commits each signal on-chain
+NEAR_ACCOUNT_ID=ax-axiom-$S.testnet AXIOM_SEC_PROVIDER_URL=http://127.0.0.1:8788 \
+  $A scan --near --no-llm --no-telegram
 
-# 6. Policy enforcement: the daily cap is 0.2 NEAR, so the 21st 0.01-NEAR call is rejected by the contract
-for i in $(seq 1 21); do $A near buy AAPL --days $i --as axiom-agent-$S.testnet || break; done
-#   → "Smart contract panicked: daily cap reached"
+# 6. The buyer bot shops
+$A near shop --as ax-bot-$S.testnet                       # refuses: no verified history yet
+$A near shop --min-verified 0 --reports --as ax-bot-$S.testnet   # buys signals + reports
+$A near status --as ax-buyer-$S.testnet && $A near receipts
 ```
 
-You should see:
-- After step 5: the provider's terminal logs `served NVDA … for receipt #0`, and `status` shows `calls 1 earned 0.01 NEAR`. The provider's balance went up by 0.01 NEAR.
-- Replaying the same receipt: `curl "localhost:8787/v1/sec-red-flags?symbol=NVDA&since=<date>&receipt=0"` returns `409 receipt #0 already redeemed`.
-- Changing the request (`symbol=AAPL&…&receipt=0`) returns `402 … paid for a different request`.
-
-### Verifiable track record (needs the Alpaca keys from the README)
-
-```bash
-export NEAR_ACCOUNT_ID=axiom-agent-$S.testnet
-export AXIOM_SEC_PROVIDER_URL=http://127.0.0.1:8787   # optional: buy filings instead of fetching them
-$A scan --near --no-llm --no-telegram   # each new signal: report + paid evidence + on-chain commitment
-$A near verify                          # every ledger signal vs its commitment and timestamp
-```
-
-`verify` recomputes `sha256("axiom-signal/v1|SYMBOL|setup|as_of|entry|stop|target|max_hold")` from the local ledger, looks it up on-chain, and checks that the commitment's block time is before 13:30 UTC on the fill day (the earliest the next open can be known). Editing any field in the ledger after the fact makes the hash disappear from the chain. Each report also ends with its commitment line and explorer link.
+What you should see:
+- Step 6, first command: `DECISION: not buying. Only 0 signal(s) verified on-chain`. A brand-new seller has no history.
+- Step 6, second command: two payments (signals and reports), the signals marked `committed on-chain`, and reports saved under `purchased/<date>/`.
+- After the next market open, the same signals appear at `/v1/track-record`, and `axiom near check-seller` shows them as `ok (before entry)`. From then on the default `shop` policy buys.
+- Replay a receipt: `curl "localhost:8787/v1/axiom-signals?date=<D>&receipt=0"` → `409 already redeemed`.
+- `axiom near buy NVDA --as ax-bot-$S.testnet` → refused: the buyer's owner never approved `sec-red-flags`.
 
 ## Live deployment (testnet)
 
-Contract **`axiom-pay-33945.testnet`**. Anyone can check it with `AXIOM_PAY_CONTRACT=axiom-pay-33945.testnet axiom near status` (no keys needed) or on [NearBlocks](https://testnet.nearblocks.io/address/axiom-pay-33945.testnet).
+Marketplace contract **`axiom-market-33945.testnet`** ([NearBlocks](https://testnet.nearblocks.io/address/axiom-market-33945.testnet)). Read-only checks need no keys: `AXIOM_PAY_CONTRACT=axiom-market-33945.testnet axiom near status`.
 
 | Role | Account |
 |---|---|
-| Owner | `axiom-owner-33945.testnet` |
-| Agent (Axiom) | `axiom-agent-33945.testnet` |
-| Provider (SEC red flags) | `axiom-sec-33945.testnet` |
+| Axiom (seller of signals and reports; buyer of SEC evidence) | `axiom-agent-33945.testnet` |
+| Axiom's owner | `axiom-owner-33945.testnet` |
+| SEC evidence seller | `axiom-sec-33945.testnet` |
+| Buyer (human) and buyer bot | `axiom-buyer-33945.testnet`, `axiom-buyerbot-33945.testnet` |
 
-These flows were run against it on 9 Nov 2026:
+These flows were run against it on 10 Nov 2026:
 
 | What | Result | Tx |
 |---|---|---|
-| Deploy + init in one tx (hand-rolled Borsh signing) | ok | [DrGdkLs9…](https://testnet.nearblocks.io/txns/DrGdkLs9BErsQwj3gsw4ijaAyjMvANoaB4DE3TLkmWja) |
-| Owner funds 1 NEAR | budget 1 NEAR | [87m9vLbT…](https://testnet.nearblocks.io/txns/87m9vLbTxc8zJ16Jcg8vVT7MVZb3NyCu6XPwcUC8gxsu) |
-| Provider registers `sec-red-flags` at 0.01 NEAR; owner approves | approved | [GRM577DB…](https://testnet.nearblocks.io/txns/GRM577DB2usNqwJBEBupEPPvyGrM1vUFEbHuv2GfqRpF), [BMeLi3xm…](https://testnet.nearblocks.io/txns/BMeLi3xmTcsfmbpu6W2kmuovEyuNeGKs4oe7sa9XCoDP) |
-| Agent tries to change the policy | `Smart contract panicked: only the owner` | [734KNdr4…](https://testnet.nearblocks.io/txns/734KNdr47zhg8U2GbvYCui6imzqJJDfGA9yxgpkE8WA5) |
-| Agent buys NVDA filings: 402 → pay → redeem | receipt #0, provider served 1 filing | [B8Yw4ffs…](https://testnet.nearblocks.io/txns/B8Yw4ffsWzb519kwvQ87pwJf9SaUE4qTiS9GhoFCBWVm) |
-| Replay receipt #0 | `409 already redeemed` | (off-chain) |
-| Use receipt #0 for AAPL | `402 paid for a different request` | (off-chain) |
-| Daily cap set to 0.03 NEAR; 3rd purchase of the day | `daily cap reached` | |
-| Provider raises price to 0.02 | approval cleared; agent cannot pay until owner re-approves | |
-| `scan --near` → JPM and XOM signals committed | `verify`: both `ok`, before the next open | [cLzdQY2b…](https://testnet.nearblocks.io/txns/cLzdQY2bfJGvSHSpGpqmXQ4wUq2UwZ7qgB5rxTBWCoU), [CK2zT6Ev…](https://testnet.nearblocks.io/txns/CK2zT6EvWikzEwHywg57sg1wndrm99mD51XFuQ4VpcPc) |
-| JPM's target edited +1% in a copy of the ledger | `verify`: JPM `NOT COMMITTED`, XOM still `ok` | (off-chain) |
+| Deploy + init (hand-rolled Borsh signing, no near-cli) | ok | [C5ZAtYZW…](https://testnet.nearblocks.io/txns/C5ZAtYZWJbAwEtqiXLbZrtvPqaD9j2brbT2dcshSbVoH) |
+| Axiom commits its JPM and XOM signals of 9 Nov at 01:41 UTC (open is 13:30 UTC) | `ok (before entry)` | [ChqGxcZA…](https://testnet.nearblocks.io/txns/ChqGxcZAwcQzTtjrFXs28sXvcEKTuMLnK27RXbh4MP9Z), [3ry66iAE…](https://testnet.nearblocks.io/txns/3ry66iAEmXSVxMpz4kaVM33tm4ib2voxFfAvG8heEphU) |
+| Buyer bot, default policy | `not buying: only 0 verified` | (off-chain decision) |
+| Buyer bot buys 9 Nov signals, 0.02 NEAR | receipt #0, both signals `committed on-chain` | [EqGPXHF8…](https://testnet.nearblocks.io/txns/EqGPXHF8JbpmHNHHGGdA3F8fPNBWQd17tQuMFNKJTopU) |
+| Buyer bot buys JPM and XOM reports, 0.05 NEAR each | receipts #1, #2, reports saved | [8ZdPE8uT…](https://testnet.nearblocks.io/txns/8ZdPE8uTUpPWFzaZKstKotdKcGxPtfxbkLc3DZ9VDpyF), [HGX9knFt…](https://testnet.nearblocks.io/txns/HGX9knFt6jUEsviqJVMBRxD6N4bStcLrg6VqVxVWcXaJ) |
+| Axiom buys NVDA filings from the SEC seller, 0.01 NEAR | receipt #3 | [G125RUvv…](https://testnet.nearblocks.io/txns/G125RUvvQe37DVmR8zudiwdWNMxDxaw4RXD7FoJRT1iK) |
+| Buyer bot tries an unapproved service | refused | (off-chain check; the contract also rejects it, see unit tests) |
 
-To upgrade the contract code while keeping its state: `axiom near deploy --no-init --as <contract account>`.
+An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on-chain cap enforcement, price-change re-approval, receipt replay, and ledger-tamper detection. Those behaviours carry over and are covered by the unit tests.
 
-**Build note:** `contract/build.sh` passes `--cfg near`, the flag cargo-near normally sets. Without it, near-sdk 5 compiles contract panics into a bare `unreachable` trap and every error message is lost.
+## Pieces
+
+| Piece | Where |
+|---|---|
+| Smart contract: wallets, policies, services, receipts, commitments | [contract/src/lib.rs](contract/src/lib.rs) |
+| NEAR client: JSON-RPC, ed25519 keys, Borsh-signed transactions, deploy | [src/near/client.rs](src/near/client.rs) |
+| Buying, track-record verification | [src/near/mod.rs](src/near/mod.rs) |
+| Seller server (signals, reports, SEC evidence, free track record) | [src/near/provider.rs](src/near/provider.rs) |
+| CLI (`axiom near …`) and the `scan --near` hook | [src/main.rs](src/main.rs) |
+
+`axiom near` commands: `create-account`, `deploy [--no-init]`, `status`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`.
 
 ## Tests
 
 ```bash
-cargo test                      # agent: Borsh layout, key round-trip, NEAR amounts, signal hash, receipt checks
-cd contract && cargo test       # contract: caps, allowlist, price-change re-approval, hijack, budget, commitments
+cargo test                  # agent: Borsh layout, keys, NEAR amounts, signal and request hashing, receipt checks
+cd contract && cargo test   # contract (16): wallet isolation, approvals at price, caps, budget, hijack, commitments
 ```
 
 ## Honest limits
 
-- **Testnet only.** The payment flow is identical on mainnet, but nothing here has handled real money.
-- **One provider, one service.** The registry is open (any account can register a service, paying its own storage), but the demo provider is run by the same team. The provider's data is public SEC EDGAR data; what is being sold is the fetching, filtering and red-flag tagging, not exclusive data.
-- **Redeemed receipts are tracked in the provider's memory.** A restarted provider would accept an unexpired receipt again (at most 15 minutes old). The buyer is never charged twice for that.
-- **Commitments prove *when* a signal existed, not that every signal was committed.** An agent could skip committing losers. `verify` lists ledger signals that were never committed, but someone who deleted rows from their own ledger could hide them. Commitments are numbered on-chain, so the count of commitments is public.
-- **NEAR Intents is not used.** Payments are native NEAR transfers from the contract. Paying providers in other assets through Intents is the natural next step.
+- **Testnet only.** Nothing here has handled real money.
+- **Payments are native NEAR.** Paying sellers in USDC or other assets through NEAR Intents is the natural next step; it is mainnet-only, so it was left out of this build.
+- **Returns are self-reported.** The chain proves when a signal existed; the profit/loss figures are the seller's paper-trade accounting. A buyer can recompute them from public prices.
+- **A seller could withhold signals it never committed.** Committed signals are numbered on-chain, but a seller that never commits a signal leaves no trace.
+- **Redeemed receipts live in the seller's memory.** A restarted seller would accept an unexpired receipt (under 15 minutes old) once more. The buyer is never charged twice.
+- **One seller of research so far** (Axiom). The contract is open: any agent can register services and build a record the same way.
+- **Selling stock research publicly can be regulated as investment advice** in many countries. Axiom's output is general research, not personalised advice.
 
 ## Disclosures
 
-- Contract built on [`near-sdk`](https://crates.io/crates/near-sdk) 5.x. Agent side uses `ed25519-dalek`, `sha2`, `bs58`, `base64`, `axum`, `reqwest`, `tokio`, `serde`.
+- Contract built on [`near-sdk`](https://crates.io/crates/near-sdk) 5.x. Agent side uses `ed25519-dalek`, `sha2`, `bs58`, `base64`, `axum`, `reqwest`, `tokio`, `serde`, `rusqlite`. Default RPC: FastNEAR's free testnet endpoint.
 - Code written with AI assistance (Claude Code).
-- All code in this repository was written during the hackathon window (first commit 9 Nov 2026). The stock-research agent was built first; the NEAR layer is in the commits that follow it.
+- All code in this repository was written during the hackathon window (first commit 9 Nov 2026). The stock-research agent came first; the NEAR layer is in the commits that follow.
+- `contract/build.sh` passes `--cfg near` (what cargo-near sets). Without it, near-sdk 5 turns contract panics into bare `unreachable` traps with no error message.

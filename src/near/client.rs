@@ -39,7 +39,11 @@ fn env(key: &str) -> Option<String> {
 impl Near {
     pub fn from_env() -> Self {
         let network = env("NEAR_NETWORK").unwrap_or_else(|| "testnet".into());
-        let rpc = env("NEAR_RPC_URL").unwrap_or_else(|| format!("https://rpc.{network}.near.org"));
+        // rpc.<network>.near.org is heavily rate-limited (HTTP 429), so default to FastNEAR's free endpoints.
+        let rpc = env("NEAR_RPC_URL").unwrap_or_else(|| match network.as_str() {
+            "mainnet" => "https://free.rpc.fastnear.com".into(),
+            _ => "https://test.rpc.fastnear.com".into(),
+        });
         Self { network, rpc, http: reqwest::Client::new() }
     }
 
@@ -51,9 +55,10 @@ impl Near {
     async fn rpc(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({"jsonrpc": "2.0", "id": "axiom", "method": method, "params": params});
         let mut last_err = None;
-        for attempt in 0..4 {
+        // The public RPC rate-limits bursts (HTTP 429); back off up to ~20s in total.
+        for attempt in 0..7u64 {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(600 * attempt)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1000 * attempt)).await;
             }
             let resp = match self.http.post(&self.rpc).json(&body).send().await {
                 Ok(r) => r,
