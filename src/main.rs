@@ -136,6 +136,9 @@ enum NearCmd {
         /// Upgrade the code only, keeping the existing state.
         #[arg(long)]
         no_init: bool,
+        /// Upgrade the code and migrate v2 state to v3 in the same transaction.
+        #[arg(long, conflicts_with = "no_init")]
+        migrate: bool,
     },
     /// Marketplace overview: services, prices, sales; plus the --as account's wallet if it has one.
     Status,
@@ -177,10 +180,99 @@ enum NearCmd {
         #[arg(long, default_value_t = 20)]
         last: u64,
     },
-    /// Seller: serve every service the --as account registered (Axiom research and/or SEC evidence).
+    /// Seller: serve every service the --as account registered (Axiom research and/or SEC evidence),
+    /// and optionally bid on jobs, e.g. `--bid sec-red-flags=0.015`.
     Serve {
         #[arg(long, default_value_t = 8787)]
         port: u16,
+        /// Bid on jobs of this kind at this price (repeatable): sec-red-flags, axiom-signals, axiom-report.
+        #[arg(long = "bid", value_name = "KIND=NEAR")]
+        bids: Vec<String>,
+        /// Base URL buyers fetch job deliveries from (default http://127.0.0.1:<port>).
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// Owner: create an agent account `<name>.<you>` with its own key, restricted on-chain to the marketplace.
+    ///
+    /// The agent's key is a function-call key: it can only call the marketplace methods of its role, cannot
+    /// attach NEAR, and has a gas allowance. Your own key is added as the account's recovery key. Buyers are
+    /// added to your wallet (opened with --budget if you have none); storage credit is prepaid for both roles.
+    AgentCreate {
+        name: String,
+        #[arg(long, value_parser = ["buyer", "seller", "both"])]
+        role: String,
+        /// Buyer: open your wallet with this budget if you have none, or add it to the existing budget.
+        #[arg(long)]
+        budget: Option<String>,
+        #[arg(long, default_value = "0.05")]
+        max_per_call: String,
+        #[arg(long, default_value = "0.5")]
+        daily_cap: String,
+        /// NEAR sent to the agent account for gas (and as its key's gas allowance).
+        #[arg(long, default_value = "0.2")]
+        gas: String,
+        /// Storage credit prepaid on the marketplace for the agent.
+        #[arg(long, default_value = "0.05")]
+        storage: String,
+    },
+    /// Prepay marketplace storage for an account (e.g. an agent whose key cannot attach NEAR).
+    FundStorage {
+        account: String,
+        #[arg(long, default_value = "0.05")]
+        amount: String,
+    },
+    /// Owner: your wallet's agents, with their balances and storage credit.
+    Agents,
+    /// Owner: move an agent account's NEAR (e.g. a seller's earnings) to you, signing with your recovery key.
+    AgentSweep {
+        agent: String,
+        /// Leave this much on the agent for gas.
+        #[arg(long, default_value = "0.1")]
+        keep: String,
+    },
+    /// Buyer agent: post a job, take the best bid from a seller with a clean record, pay, collect, confirm.
+    Hire {
+        /// e.g. sec-red-flags|JPM|2026-10-10, axiom-signals|2026-11-09, axiom-report|JPM|2026-11-09
+        topic: String,
+        #[arg(long, default_value = "0.03")]
+        max_price: String,
+        /// Seconds to wait for bids.
+        #[arg(long, default_value_t = 25)]
+        wait: u64,
+    },
+    /// Recent jobs on the board with their bids and outcomes.
+    Jobs {
+        #[arg(long, default_value_t = 10)]
+        last: u64,
+    },
+    /// Recent collective-purchase pools.
+    Pools {
+        #[arg(long, default_value_t = 10)]
+        last: u64,
+    },
+    /// Demo economy: seller agents bid for buyer agents' jobs, then the buyers pool one purchase.
+    Swarm {
+        /// Seller agent and its price for sec-red-flags jobs (repeatable), e.g. --seller fast.alice.testnet=0.012
+        #[arg(long = "seller", value_name = "ACCOUNT=NEAR", required = true)]
+        sellers: Vec<String>,
+        /// Buyer agent (repeatable).
+        #[arg(long = "buyer", required = true)]
+        buyers: Vec<String>,
+        /// Symbols to hire SEC red-flag research for, one job each.
+        #[arg(long, value_delimiter = ',', default_value = "JPM,XOM,NVDA")]
+        symbols: Vec<String>,
+        /// Days of filings each job asks for.
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+        #[arg(long, default_value = "0.03")]
+        max_price: String,
+        /// Collective purchase: all buyers split this seller's axiom-signals for --pool-date.
+        #[arg(long)]
+        pool_seller: Option<String>,
+        #[arg(long)]
+        pool_date: Option<NaiveDate>,
+        #[arg(long, default_value_t = 8801)]
+        base_port: u16,
     },
     /// Agent: buy one symbol's recent SEC filings from an evidence seller.
     Buy {
@@ -1029,6 +1121,17 @@ fn window_return(spy: &[Bar], from: NaiveDate, to: NaiveDate) -> Option<f64> {
     Some(z.close / a.open - 1.0)
 }
 
+/// `["sec-red-flags=0.015"]` -> {"sec-red-flags": yocto}.
+fn parse_prices(items: &[String]) -> Result<std::collections::HashMap<String, u128>> {
+    items
+        .iter()
+        .map(|b| {
+            let (k, v) = b.split_once('=').with_context(|| format!("--bid takes KIND=NEAR, got {b:?}"))?;
+            Ok((k.trim().to_string(), near::client::parse_near(v)?))
+        })
+        .collect()
+}
+
 async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
     use near::client::{fmt_near, parse_near, u128_field, Action, Near, Signer, TGAS};
     use serde_json::json;
@@ -1067,11 +1170,13 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
             }
             bail!("faucet accepted the request but {account} does not exist yet; key saved to {}", path.display())
         }
-        NearCmd::Deploy { wasm, no_init } => {
+        NearCmd::Deploy { wasm, no_init, migrate } => {
             let s = signer()?;
             let code = std::fs::read(&wasm).with_context(|| format!("reading {wasm} (build it with contract/build.sh)"))?;
             let mut actions = vec![Action::Deploy(code)];
-            if !no_init {
+            if migrate {
+                actions.push(Action::Call { method: "migrate".into(), args: json!({}), gas: 100 * TGAS, deposit: 0 });
+            } else if !no_init {
                 actions.push(Action::Call { method: "new".into(), args: json!({}), gas: 100 * TGAS, deposit: 0 });
             }
             let r = near.send(&s, &s.account_id, actions).await?;
@@ -1141,7 +1246,9 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                 .to_string()
             });
             let args = json!({"service_id": service, "price": parse_near(&price)?.to_string(), "description": description});
-            let r = near.call(&signer()?, &contract()?, "register_service", args, parse_near("0.01")?).await?;
+            let s = signer()?;
+            let deposit = near.storage_deposit(&s, parse_near("0.01")?).await?;
+            let r = near.call(&s, &contract()?, "register_service", args, deposit).await?;
             done(&format!("Registered {service} at {price} NEAR/call"), &r.hash);
         }
         NearCmd::Approve { service } => {
@@ -1181,9 +1288,198 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                 println!("No receipts yet.");
             }
         }
-        NearCmd::Serve { port } => {
+        NearCmd::Serve { port, bids, endpoint } => {
             let ua = std::env::var("SEC_USER_AGENT").ok().filter(|s| !s.trim().is_empty());
-            near::provider::serve(port, me()?, contract()?, db_path(), ua).await?;
+            let bidding = if bids.is_empty() {
+                None
+            } else {
+                let prices = parse_prices(&bids)?;
+                let endpoint = endpoint.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
+                Some((signer()?, near::provider::BidPolicy { prices, endpoint }))
+            };
+            near::provider::serve(near::provider::SellerConfig {
+                port,
+                seller: me()?,
+                contract: contract()?,
+                db_path: db_path(),
+                sec_user_agent: ua,
+                sec: None,
+                bidding,
+                tag: String::new(),
+            })
+            .await?;
+        }
+        NearCmd::AgentCreate { name, role, budget, max_per_call, daily_cap, gas, storage } => {
+            use near::client::FnAccess;
+            let owner = signer()?;
+            let c = contract()?;
+            if name.contains('.') || name.is_empty() {
+                bail!("name is the first part only; the agent will be <name>.{}", owner.account_id);
+            }
+            let agent_id = format!("{name}.{}", owner.account_id);
+            if near.balance(&agent_id).await?.is_some() {
+                bail!("{agent_id} already exists");
+            }
+            let mut methods: Vec<&str> = Vec::new();
+            if role != "seller" {
+                methods.extend(["pay", "post_job", "award", "confirm", "cancel_job", "open_pool", "join_pool", "refund_pool"]);
+            }
+            if role != "buyer" {
+                methods.extend(["commit", "register_service", "bid"]);
+            }
+            let gas_amount = parse_near(&gas)?;
+            let agent = Signer::generate(&agent_id)?;
+            let r = near
+                .send(
+                    &owner,
+                    &agent_id,
+                    vec![
+                        Action::CreateAccount,
+                        Action::Transfer(gas_amount),
+                        Action::AddKey {
+                            public_key: agent.public_key(),
+                            access: Some(FnAccess {
+                                allowance: Some(gas_amount),
+                                receiver: c.clone(),
+                                methods: methods.iter().map(|m| m.to_string()).collect(),
+                            }),
+                        },
+                        Action::AddKey { public_key: owner.public_key(), access: None },
+                    ],
+                )
+                .await?;
+            let path = agent.save(&near.network)?;
+            done(&format!("Created {agent_id} ({role}); its key can only call {} on {c}", methods.join(", ")), &r.hash);
+            println!("  agent key saved to {}; your key {} is its recovery key", path.display(), owner.public_key_str());
+            let r = near.call(&owner, &c, "fund_storage", json!({"account": agent_id}), parse_near(&storage)?).await?;
+            done(&format!("Prepaid {storage} NEAR storage credit for {agent_id}"), &r.hash);
+            if role != "seller" {
+                let wallet = near.view(&c, "get_wallet", json!({"owner": owner.account_id})).await?;
+                if wallet.is_null() {
+                    let budget = budget.as_deref().context("you have no wallet yet: pass --budget to open one")?;
+                    let args = json!({"agent": agent_id, "max_per_call": parse_near(&max_per_call)?.to_string(), "daily_cap": parse_near(&daily_cap)?.to_string()});
+                    let r = near.call(&owner, &c, "open_wallet", args, parse_near(budget)?).await?;
+                    done(&format!("Opened your wallet ({budget} NEAR) with {agent_id} as its agent"), &r.hash);
+                } else {
+                    let r = near.call(&owner, &c, "add_agent", json!({"agent": agent_id}), parse_near("0.01")?).await?;
+                    done(&format!("{agent_id} now spends from your wallet (shared budget and caps)"), &r.hash);
+                    if let Some(b) = budget {
+                        let r = near.call(&owner, &c, "deposit", json!({}), parse_near(&b)?).await?;
+                        done(&format!("Added {b} NEAR to your budget"), &r.hash);
+                    }
+                }
+                println!("  approve the services it may buy with `axiom near approve <service> --as {}`", owner.account_id);
+            }
+        }
+        NearCmd::FundStorage { account, amount } => {
+            let r = near.call(&signer()?, &contract()?, "fund_storage", json!({"account": account}), parse_near(&amount)?).await?;
+            let total: u128 = r.value.as_ref().and_then(|v| v.as_str()).unwrap_or("0").parse()?;
+            done(&format!("{account} storage credit is now {}", fmt_near(total)), &r.hash);
+        }
+        NearCmd::Agents => {
+            let c = contract()?;
+            let owner = me()?;
+            let agents = near.view(&c, "get_agents", json!({"owner": owner})).await?;
+            let list: Vec<String> = agents.as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+            if list.is_empty() {
+                println!("{owner} has no wallet on {c}.");
+            }
+            for a in list {
+                let bal = near.balance(&a).await?.map(fmt_near).unwrap_or_else(|| "no account".into());
+                let credit = near.view(&c, "get_storage_credit", json!({"account": a})).await?;
+                let credit = credit.as_str().and_then(|s| s.parse::<u128>().ok()).unwrap_or(0);
+                println!("  {a:<45} balance {bal:>14}  storage credit {}", fmt_near(credit));
+            }
+        }
+        NearCmd::AgentSweep { agent, keep } => {
+            let owner = signer()?;
+            if !agent.ends_with(&format!(".{}", owner.account_id)) {
+                bail!("{agent} is not a sub-account of {}", owner.account_id);
+            }
+            let bal = near.balance(&agent).await?.context("no such account")?;
+            let amount = bal.saturating_sub(parse_near(&keep)?);
+            if amount == 0 {
+                bail!("{agent} has only {}", fmt_near(bal));
+            }
+            let r = near.send(&owner.acting_as(&agent), &owner.account_id, vec![Action::Transfer(amount)]).await?;
+            done(&format!("Moved {} from {agent} to {}", fmt_near(amount), owner.account_id), &r.hash);
+        }
+        NearCmd::Hire { topic, max_price, wait } => {
+            let ctx = near::Ctx::from_env(as_account)?;
+            let h = near::swarm::hire(&ctx, &topic, parse_near(&max_price)?, std::time::Duration::from_secs(wait), usize::MAX).await?;
+            println!("{}", serde_json::to_string_pretty(&h.result)?);
+        }
+        NearCmd::Jobs { last } => {
+            let c = contract()?;
+            let n = near.view(&c, "job_count", json!({})).await?.as_u64().unwrap_or(0);
+            let jobs = near.view(&c, "get_jobs", json!({"from": n.saturating_sub(last), "limit": last})).await?;
+            for j in jobs.as_array().into_iter().flatten().rev() {
+                println!(
+                    "#{:<4} {:<10} {:<34} max {:>10}  buyer {}  winner {} at {}",
+                    j["id"],
+                    j["status"].as_str().unwrap_or("?"),
+                    j["topic"].as_str().unwrap_or(""),
+                    fmt_near(u128_field(j, "max_price")?),
+                    j["buyer"].as_str().unwrap_or("?"),
+                    j["winner"].as_str().unwrap_or("-"),
+                    fmt_near(u128_field(j, "price")?)
+                );
+                for b in near.view(&c, "get_bids", json!({"job_id": j["id"]})).await?.as_array().into_iter().flatten() {
+                    println!("        bid {:>10} {}", fmt_near(u128_field(b, "price")?), b["seller"].as_str().unwrap_or("?"));
+                }
+            }
+            if n == 0 {
+                println!("No jobs yet.");
+            }
+        }
+        NearCmd::Pools { last } => {
+            let c = contract()?;
+            let n = near.view(&c, "pool_count", json!({})).await?.as_u64().unwrap_or(0);
+            let pools = near.view(&c, "get_pools", json!({"from": n.saturating_sub(last), "limit": last})).await?;
+            for p in pools.as_array().into_iter().flatten().rev() {
+                let members: Vec<&str> = p["members"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str).collect();
+                println!(
+                    "#{:<4} {:<9} {:<14} {:>10} split {}/{}  receipt {}  {}",
+                    p["id"],
+                    p["status"].as_str().unwrap_or("?"),
+                    p["service_id"].as_str().unwrap_or("?"),
+                    fmt_near(u128_field(p, "price")?),
+                    members.len(),
+                    p["shares"],
+                    p["receipt"].as_u64().map(|r| format!("#{r}")).unwrap_or_else(|| "-".into()),
+                    members.join(", ")
+                );
+            }
+            if n == 0 {
+                println!("No pools yet.");
+            }
+        }
+        NearCmd::Swarm { sellers, buyers, symbols, days, max_price, pool_seller, pool_date, base_port } => {
+            let since = (Utc::now().date_naive() - TimeDelta::days(days)).to_string();
+            let mut specs = Vec::new();
+            for (i, s) in sellers.iter().enumerate() {
+                let (account, price) = s.split_once('=').context("--seller takes ACCOUNT=NEAR")?;
+                specs.push(near::swarm::SellerSpec {
+                    account: account.to_string(),
+                    port: base_port + i as u16,
+                    prices: near::swarm::sec_prices(parse_near(price)?),
+                });
+            }
+            let pool = match (pool_seller, pool_date) {
+                (Some(url), Some(d)) => Some((url, near::SIGNALS_SERVICE.to_string(), vec![("date", d.to_string())], vec![d.to_string()])),
+                (None, None) => None,
+                _ => bail!("--pool-seller and --pool-date go together"),
+            };
+            let plan = near::swarm::SwarmPlan {
+                sellers: specs,
+                buyers,
+                topics: symbols.iter().map(|s| format!("{}|{}|{since}", near::SEC_SERVICE, s.to_uppercase())).collect(),
+                max_price: parse_near(&max_price)?,
+                pool,
+                db_path: db_path(),
+                sec_user_agent: std::env::var("SEC_USER_AGENT").ok().filter(|s| !s.trim().is_empty()),
+            };
+            near::swarm::run(plan, contract()?).await?;
         }
         NearCmd::Buy { symbol, provider, days } => {
             let ctx = near::Ctx::from_env(as_account)?;

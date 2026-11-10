@@ -3,6 +3,7 @@
 //! See `contract/` for the smart contract.
 pub mod client;
 pub mod provider;
+pub mod swarm;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Datelike, NaiveDate, TimeDelta, Utc, Weekday};
@@ -52,6 +53,11 @@ pub fn request_line(service_id: &str, params: &[&str]) -> String {
     s
 }
 
+/// The request a job's receipt is bound to (the contract computes the same hash when the job is awarded).
+pub fn job_request_hash(id: u64, topic: &str) -> String {
+    sha256_hex(&format!("axiom-job/v1|{id}|{topic}"))
+}
+
 /// Canonical text of a signal. Its SHA-256 is what gets committed on-chain.
 /// Fixed precision so the same signal always hashes the same, from memory or from the database.
 pub fn signal_line(symbol: &str, setup: &str, as_of: NaiveDate, entry: f64, stop: f64, target: f64, max_hold: usize) -> String {
@@ -62,9 +68,11 @@ pub fn stored_hash(s: &StoredSignal) -> String {
     sha256_hex(&signal_line(&s.symbol, &s.setup, s.as_of, s.entry, s.stop, s.target, s.max_hold))
 }
 
-/// Commits a signal hash for the signer (attaching 0.01 NEAR for storage; the excess is refunded). Returns the tx hash.
+/// Commits a signal hash for the signer. Storage: 0.01 NEAR attached (excess refunded), or, for an agent with a
+/// restricted key, its prepaid storage credit. Returns the tx hash.
 pub async fn commit_signal(ctx: &Ctx, hash: &str, label: &str) -> Result<String> {
-    let r = ctx.near.call(&ctx.signer, &ctx.contract, "commit", json!({"hash": hash, "label": label}), parse_near("0.01")?).await?;
+    let deposit = ctx.near.storage_deposit(&ctx.signer, parse_near("0.01")?).await?;
+    let r = ctx.near.call(&ctx.signer, &ctx.contract, "commit", json!({"hash": hash, "label": label}), deposit).await?;
     Ok(r.hash)
 }
 
@@ -141,7 +149,7 @@ pub async fn purchase(ctx: &Ctx, base_url: &str, service_id: &str, query: &[(&st
 
 /// Redeems a paid receipt. Retries while the receipt is not yet final on the seller's RPC and while the
 /// seller has a transient upstream failure (it un-redeems the receipt in that case, so retrying is safe).
-async fn redeem(http: &reqwest::Client, url: &str, query: &[(&str, String)], receipt: u64) -> Result<Value> {
+pub(crate) async fn redeem(http: &reqwest::Client, url: &str, query: &[(&str, String)], receipt: u64) -> Result<Value> {
     let mut last = String::new();
     for attempt in 0..8u64 {
         if attempt > 0 {
@@ -294,6 +302,7 @@ mod tests {
         );
         assert_eq!(sha256_hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(request_line("axiom-report", &["NVDA", "2026-11-06"]), "axiom-pay/v1|axiom-report|NVDA|2026-11-06");
+        assert_eq!(job_request_hash(3, "x"), sha256_hex("axiom-job/v1|3|x"));
     }
 
     #[test]

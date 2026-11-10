@@ -1,6 +1,6 @@
 # Axiom Pay: a market where AI research agents sell to other agents
 
-Built at **NEAR HACKATHON** (Nov 2026). Tracks: **Agent Economy** (primary), **AI Swarms**, **Open Innovation**.
+Built at **NEAR HACKATHON** (Nov 2026). Tracks: **Agent Economy** (primary), **AI Swarms**, **AI Security & Defense**, **Open Innovation**.
 
 Axiom is a research agent for US stocks (see [README.md](README.md)). Axiom Pay is a NEAR smart contract plus Rust tooling that lets Axiom **sell** its research to other AI agents, per call, and lets buyer agents **check whether the research is any good before they pay**.
 
@@ -18,6 +18,25 @@ Anyone can sell trade signals, and a buyer can't tell a good seller from one tha
 | **Evidence seller** | Anyone can sell inputs too. Here a second agent sells SEC filings with red-flag tags (0.01 NEAR), and Axiom buys them for its own research. |
 
 The result is a small agent economy: the buyer bot pays Axiom, Axiom pays the evidence seller, every payment has an on-chain receipt bound to the exact request, and every prediction has an on-chain timestamp.
+
+### Agent wallets: the platform gives each agent its own NEAR account
+
+`axiom near agent-create <name> --role buyer|seller --as <owner>` creates `<name>.<owner>` in one transaction:
+
+- The agent gets its **own key, restricted by NEAR itself**: it can call only its role's methods on the marketplace (buyers: `pay`, `post_job`, `award`, `confirm`, `open_pool`, `join_pool`, …; sellers: `commit`, `register_service`, `bid`). It **cannot attach NEAR** to a call, cannot send NEAR anywhere, and has a gas allowance. A stolen agent key cannot move money.
+- The owner's key is added as the account's **recovery key**, so the owner can always sweep a seller's earnings (`agent-sweep`) or rotate keys.
+- The owner prepays the agent's on-chain storage (`fund_storage`), because a restricted key cannot attach deposits.
+- A buyer joins the owner's wallet. One wallet can fund **a fleet of agents** with a shared budget, caps and approvals (`add_agent` / `remove_agent`).
+
+Checked on testnet: an agent key calling `set_policy` is rejected with `MethodNameMismatch`, and one attaching NEAR with `DepositWithFunctionCall`, before the contract even runs.
+
+### Agent swarm: bidding, reputation, collective purchase
+
+- **Jobs.** A buyer agent posts a job (`sec-red-flags|JPM|2026-10-11`) with a maximum price. Seller agents watch the board and bid on the jobs they can deliver. The buyer awards one bid and pays it from its wallet, under the same per-call cap, daily cap and budget. The receipt is bound to `sha256("axiom-job/v1|<id>|<topic>")`, and the winner delivers at `GET <endpoint>/v1/jobs/<id>?receipt=<n>`.
+- **Reputation.** The buyer confirms delivery or disputes it on-chain (`confirm`). Each seller's `delivered` / `disputed` counts are public. Buyers take the cheapest bid from a seller with no more disputes than deliveries.
+- **Pools.** Several agents from different owners split one purchase. Each share is debited from its own wallet (its owner must have approved the service) into escrow. The last share pays the seller and issues one receipt, which the seller honours once per member. An unfilled pool is refunded to the wallets after its deadline (`refund_pool`, callable by anyone).
+
+`axiom near swarm` runs the whole economy in one process: it starts each seller agent's server and bidding loop, has buyer agents hire them round by round, then has the buyers pool a purchase from Axiom.
 
 ### Why the track record can be trusted
 
@@ -85,15 +104,25 @@ SEC_USER_AGENT="axiom-demo you@example.com" $A near serve --port 8788 --as ax-se
 NEAR_ACCOUNT_ID=ax-axiom-$S.testnet AXIOM_SEC_PROVIDER_URL=http://127.0.0.1:8788 \
   $A scan --near --no-llm --no-telegram
 
-# 6. The buyer bot shops
+# 6. Agent wallets and the swarm (restricted keys, bidding, a pooled purchase)
+$A near agent-create edgar --role seller --as ax-sec-$S.testnet
+$A near agent-create scout --role buyer  --as ax-buyer-$S.testnet
+$A near agent-create atlas --role buyer  --budget 1 --as ax-owner-$S.testnet
+$A near approve axiom-signals --as ax-owner-$S.testnet
+$A near swarm --seller ax-sec-$S.testnet=0.02 --seller edgar.ax-sec-$S.testnet=0.012 \
+  --buyer scout.ax-buyer-$S.testnet --buyer atlas.ax-owner-$S.testnet \
+  --symbols JPM,XOM --pool-seller http://127.0.0.1:8787 --pool-date <latest signal date>
+
+# 7. The buyer bot shops
 $A near shop --as ax-bot-$S.testnet                       # refuses: no verified history yet
 $A near shop --min-verified 0 --reports --as ax-bot-$S.testnet   # buys signals + reports
 $A near status --as ax-buyer-$S.testnet && $A near receipts
 ```
 
 What you should see:
-- Step 6, first command: `DECISION: not buying. Only 0 signal(s) verified on-chain`. A brand-new seller has no history.
-- Step 6, second command: two payments (signals and reports), the signals marked `committed on-chain`, and reports saved under `purchased/<date>/`.
+- Step 6: both sellers bid on each job, the cheaper one wins, delivers and is confirmed on-chain. Then the two buyers split one `axiom-signals` purchase and each redeems the same receipt.
+- Step 7, first command: `DECISION: not buying. Only 0 signal(s) verified on-chain`. A brand-new seller has no history.
+- Step 7, second command: two payments (signals and reports), the signals marked `committed on-chain`, and reports saved under `purchased/<date>/`.
 - After the next market open, the same signals appear at `/v1/track-record`, and `axiom near check-seller` shows them as `ok (before entry)`. From then on the default `shop` policy buys.
 - Replay a receipt: `curl "localhost:8787/v1/axiom-signals?date=<D>&receipt=0"` → `409 already redeemed`.
 - `axiom near buy NVDA --as ax-bot-$S.testnet` → refused: the buyer's owner never approved `sec-red-flags`.
@@ -121,6 +150,25 @@ These flows were run against it on 10 Nov 2026:
 | Axiom buys NVDA filings from the SEC seller, 0.01 NEAR | receipt #3 | [G125RUvv…](https://testnet.nearblocks.io/txns/G125RUvvQe37DVmR8zudiwdWNMxDxaw4RXD7FoJRT1iK) |
 | Buyer bot tries an unapproved service | refused | (off-chain check; the contract also rejects it, see unit tests) |
 
+**Contract v3** (agent fleets, storage credit, jobs, pools) was deployed over v2 **in place**, with a `migrate` call in the same transaction ([AMviPfdx…](https://testnet.nearblocks.io/txns/AMviPfdxaH58HNfrib5TmD8By4CGXVL7h9amne4i9qLB)). The earlier receipts and the JPM/XOM commitments made before the open survived it.
+
+Agent accounts made by `agent-create`, each with a restricted key:
+
+| Agent | Role | Owner |
+|---|---|---|
+| `edgar.axiom-sec-33945.testnet`, `quill.axiom-owner-33945.testnet` | seller (bids on SEC research jobs) | `axiom-sec`, `axiom-owner` |
+| `scout.axiom-buyer-33945.testnet`, `ranger.axiom-owner-33945.testnet`, `atlas.axiom-sec-33945.testnet` | buyer | three different owners |
+
+Swarm runs on 10 Nov 2026 (`axiom near jobs`, `axiom near pools` list them):
+
+| What | Result | Tx |
+|---|---|---|
+| Job #0, JPM filings: 3 sellers bid 0.012 / 0.015 / 0.02 NEAR | cheapest (edgar) awarded, delivered 5 filings, confirmed | [FvarLSzo…](https://testnet.nearblocks.io/txns/FvarLSzoRe8KiRTqC9LXfnDS4DJ6TgLDmSXRWXQKoeub) |
+| Jobs #1, #2 | **disputed; this was our bug, not edgar's.** The seller read the job before the award was final and refused delivery. Fixed: it now answers "retry". The disputes stay on edgar's record. | [C6Tnqt3E…](https://testnet.nearblocks.io/txns/C6Tnqt3EZ7A8TP1FNAaLBPiZgAZfiEsABg8JePa9USpq) |
+| Pool #0: 3 buyers from 3 owners split Axiom's 9 Nov signals (0.02 NEAR) | 0.006666 NEAR each; seller paid once; receipt #7 redeemed by all 3 | [BzmJts6w…](https://testnet.nearblocks.io/txns/BzmJts6wdeog28xiYi3f621QMpLjie7crtAaF1tEri7m), [58t4poSx…](https://testnet.nearblocks.io/txns/58t4poSxoF71X9sNqYZoYcdMqCpSAABD6EDLGSkhFiu9) |
+| Jobs #3 to #5 (AAPL, MSFT, TSLA) | edgar is still cheapest but now has more disputes than deliveries, so the buyers hire quill (0.015) instead; 3 deliveries confirmed | [6spNmuf9…](https://testnet.nearblocks.io/txns/6spNmuf9H4N5hwqK2Czu1kqVu9A6JPqvp225c1xjwUKC) |
+| Agent key calls `set_policy` / attaches NEAR | rejected by the protocol: `MethodNameMismatch` / `DepositWithFunctionCall` | (rejected before execution) |
+
 An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on-chain cap enforcement, price-change re-approval, receipt replay, and ledger-tamper detection. Those behaviours carry over and are covered by the unit tests.
 
 ## Website
@@ -131,19 +179,22 @@ An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on
 
 | Piece | Where |
 |---|---|
-| Smart contract: wallets, policies, services, receipts, commitments | [contract/src/lib.rs](contract/src/lib.rs) |
+| Smart contract: wallets and agent fleets, policies, services, receipts, commitments, storage credit, jobs and bids, seller reputation, pools | [contract/src/lib.rs](contract/src/lib.rs) |
 | NEAR client: JSON-RPC, ed25519 keys, Borsh-signed transactions, deploy | [src/near/client.rs](src/near/client.rs) |
 | Buying, track-record verification | [src/near/mod.rs](src/near/mod.rs) |
-| Seller server (signals, reports, SEC evidence, free track record) | [src/near/provider.rs](src/near/provider.rs) |
+| Seller server (signals, reports, SEC evidence, free track record, job delivery, automatic bidding) | [src/near/provider.rs](src/near/provider.rs) |
+| Swarm: hiring by bid with reputation, pooled purchases, the demo economy | [src/near/swarm.rs](src/near/swarm.rs) |
 | CLI (`axiom near …`) and the `scan --near` hook | [src/main.rs](src/main.rs) |
 
-`axiom near` commands: `create-account`, `deploy [--no-init]`, `status`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`, `export-record`.
+`axiom near` commands: `create-account`, `deploy [--no-init|--migrate]`, `status`, `agent-create`, `agents`, `agent-sweep`, `fund-storage`, `hire`, `jobs`, `pools`, `swarm`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve [--bid KIND=NEAR]`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`, `export-record`.
 
 ## Tests
 
 ```bash
-cargo test                  # agent: Borsh layout, keys, NEAR amounts, signal and request hashing, receipt checks
-cd contract && cargo test   # contract (16): wallet isolation, approvals at price, caps, budget, hijack, commitments
+cargo test                  # agent: Borsh layout (incl. create-account and restricted keys), keys, NEAR amounts,
+                            # signal/request/job hashing, receipt checks, job topics, bid choice
+cd contract && cargo test   # contract (27): wallet isolation, approvals at price, caps, budget, hijack, commitments,
+                            # fleets, storage credit, job bidding/award/confirm, pools fill/refund/approval
 ```
 
 ## Honest limits
@@ -152,6 +203,9 @@ cd contract && cargo test   # contract (16): wallet isolation, approvals at pric
 - **Payments are native NEAR.** Paying sellers in USDC or other assets through NEAR Intents is the natural next step; it is mainnet-only, so it was left out of this build.
 - **Returns are self-reported.** The chain proves when a signal existed; the profit/loss figures are the seller's paper-trade accounting. A buyer can recompute them from public prices.
 - **A seller could withhold signals it never committed.** Committed signals are numbered on-chain, but a seller that never commits a signal leaves no trace.
+- **Disputes are the buyer's word.** `confirm(delivered=false)` records what the buyer says; a dishonest buyer can dispute a good delivery. It still paid, so disputing has a price, but a seller cannot appeal on-chain yet.
+- **Pool receipts are honoured once per member by count**, not per member identity: the seller cannot tell which member is calling over plain HTTP. A signed request from the member's key would fix this.
+- **Job sellers here are local processes.** Their endpoints are `127.0.0.1` URLs, so the swarm runs on one machine; on a server, `--endpoint` takes a public URL.
 - **Redeemed receipts live in the seller's memory.** A restarted seller would accept an unexpired receipt (under 15 minutes old) once more. The buyer is never charged twice.
 - **One seller of research so far** (Axiom). The contract is open: any agent can register services and build a record the same way.
 - **Selling stock research publicly can be regulated as investment advice** in many countries. Axiom's output is general research, not personalised advice.

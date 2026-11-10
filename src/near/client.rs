@@ -22,8 +22,20 @@ pub struct Signer {
 
 /// A NEAR transaction action. Only the ones Axiom uses.
 pub enum Action {
+    CreateAccount,
     Deploy(Vec<u8>),
     Call { method: String, args: Value, gas: u64, deposit: u128 },
+    Transfer(u128),
+    /// Adds an ed25519 key. `access: None` is full access.
+    AddKey { public_key: [u8; 32], access: Option<FnAccess> },
+}
+
+/// A function-call access key: it can only call `methods` (all, if empty) on `receiver`, cannot attach
+/// deposits, and can burn at most `allowance` yoctoNEAR in gas (unlimited if None).
+pub struct FnAccess {
+    pub allowance: Option<u128>,
+    pub receiver: String,
+    pub methods: Vec<String>,
 }
 
 pub struct TxResult {
@@ -112,12 +124,26 @@ impl Near {
     }
 
     /// Signs and submits a transaction, waits for execution, and fails if any receipt failed.
+    /// Retries with a fresh nonce if the previous transaction from this key is not visible to the RPC yet.
     pub async fn send(&self, signer: &Signer, receiver: &str, actions: Vec<Action>) -> Result<TxResult> {
+        let mut attempt = 0;
+        loop {
+            match self.send_once(signer, receiver, &actions).await {
+                Err(e) if attempt < 4 && format!("{e:#}").contains("InvalidNonce") => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt)).await;
+                }
+                r => return r,
+            }
+        }
+    }
+
+    async fn send_once(&self, signer: &Signer, receiver: &str, actions: &[Action]) -> Result<TxResult> {
         let pk = signer.public_key_str();
         let ak = self
             .rpc(
                 "query",
-                json!({"request_type": "view_access_key", "finality": "final", "account_id": signer.account_id, "public_key": pk}),
+                json!({"request_type": "view_access_key", "finality": "optimistic", "account_id": signer.account_id, "public_key": pk}),
             )
             .await
             .with_context(|| format!("access key {pk} for {}", signer.account_id))?;
@@ -127,7 +153,7 @@ impl Near {
             .try_into()
             .map_err(|_| anyhow::anyhow!("bad block hash"))?;
 
-        let tx = encode_transaction(&signer.account_id, &signer.public_key(), nonce, receiver, &block_hash, &actions)?;
+        let tx = encode_transaction(&signer.account_id, &signer.public_key(), nonce, receiver, &block_hash, actions)?;
         let digest: [u8; 32] = Sha256::digest(&tx).into();
         let sig = signer.key.sign(&digest).to_bytes();
         let mut signed = tx;
@@ -155,6 +181,22 @@ impl Near {
             .and_then(|s| B64.decode(s).ok())
             .and_then(|b| serde_json::from_slice(&b).ok());
         Ok(TxResult { hash, value })
+    }
+
+    /// Whether the signer's key is a full-access key (function-call keys cannot attach deposits).
+    pub async fn is_full_access(&self, signer: &Signer) -> Result<bool> {
+        let ak = self
+            .rpc(
+                "query",
+                json!({"request_type": "view_access_key", "finality": "final", "account_id": signer.account_id, "public_key": signer.public_key_str()}),
+            )
+            .await?;
+        Ok(ak["permission"].as_str() == Some("FullAccess"))
+    }
+
+    /// `amount` if the signer can attach deposits, else 0 (the contract then draws on its storage credit).
+    pub async fn storage_deposit(&self, signer: &Signer, amount: u128) -> Result<u128> {
+        Ok(if self.is_full_access(signer).await? { amount } else { 0 })
     }
 
     pub async fn call(&self, signer: &Signer, contract: &str, method: &str, args: Value, deposit: u128) -> Result<TxResult> {
@@ -212,6 +254,11 @@ impl Signer {
         format!("ed25519:{}", bs58::encode(self.public_key()).into_string())
     }
 
+    /// The same key, signing as another account (e.g. an owner's recovery key on its agent's account).
+    pub fn acting_as(&self, account: &str) -> Self {
+        Self { account_id: account.to_string(), key: self.key.clone() }
+    }
+
     pub fn secret_str(&self) -> String {
         let mut kp = self.key.to_bytes().to_vec();
         kp.extend_from_slice(&self.public_key());
@@ -266,6 +313,35 @@ pub fn encode_transaction(
     out.extend_from_slice(&(actions.len() as u32).to_le_bytes());
     for a in actions {
         match a {
+            Action::CreateAccount => out.push(0),
+            Action::Transfer(amount) => {
+                out.push(3);
+                out.extend_from_slice(&amount.to_le_bytes());
+            }
+            Action::AddKey { public_key, access } => {
+                out.push(5);
+                out.push(0); // ED25519
+                out.extend_from_slice(public_key);
+                out.extend_from_slice(&0u64.to_le_bytes()); // access key nonce
+                match access {
+                    None => out.push(1), // FullAccess
+                    Some(f) => {
+                        out.push(0); // FunctionCall
+                        match f.allowance {
+                            None => out.push(0),
+                            Some(a) => {
+                                out.push(1);
+                                out.extend_from_slice(&a.to_le_bytes());
+                            }
+                        }
+                        put_bytes(&mut out, f.receiver.as_bytes());
+                        out.extend_from_slice(&(f.methods.len() as u32).to_le_bytes());
+                        for m in &f.methods {
+                            put_bytes(&mut out, m.as_bytes());
+                        }
+                    }
+                }
+            }
             Action::Deploy(code) => {
                 out.push(1);
                 put_bytes(&mut out, code);
@@ -362,5 +438,38 @@ mod tests {
         want.extend(1u64.to_le_bytes());
         want.extend(2u128.to_le_bytes());
         assert_eq!(tx, want);
+    }
+
+    #[test]
+    fn create_account_actions_layout() {
+        let acts = [
+            Action::CreateAccount,
+            Action::Transfer(7),
+            Action::AddKey { public_key: [1u8; 32], access: None },
+            Action::AddKey {
+                public_key: [2u8; 32],
+                access: Some(FnAccess { allowance: Some(9), receiver: "c".into(), methods: vec!["pay".into()] }),
+            },
+        ];
+        let tx = encode_transaction("a", &[7u8; 32], 5, "b", &[9u8; 32], &acts).unwrap();
+        let mut want = Vec::new();
+        want.extend(4u32.to_le_bytes());
+        want.push(0);
+        want.push(3);
+        want.extend(7u128.to_le_bytes());
+        want.extend([5, 0]);
+        want.extend([1u8; 32]);
+        want.extend(0u64.to_le_bytes());
+        want.push(1);
+        want.extend([5, 0]);
+        want.extend([2u8; 32]);
+        want.extend(0u64.to_le_bytes());
+        want.extend([0, 1]);
+        want.extend(9u128.to_le_bytes());
+        want.extend([1, 0, 0, 0, b'c']);
+        want.extend(1u32.to_le_bytes());
+        want.extend([3, 0, 0, 0, b'p', b'a', b'y']);
+        // Header: signer(5) + key(33) + nonce(8) + receiver(5) + block hash(32).
+        assert_eq!(&tx[5 + 33 + 8 + 5 + 32..], &want[..]);
     }
 }
