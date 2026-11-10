@@ -59,6 +59,12 @@ impl Near {
         Self { network, rpc, http: reqwest::Client::new() }
     }
 
+    /// Read-only mainnet RPC (token data lives on mainnet even when Axiom Pay runs on testnet).
+    pub fn mainnet() -> Self {
+        let rpc = env("NEAR_MAINNET_RPC_URL").unwrap_or_else(|| "https://free.rpc.fastnear.com".into());
+        Self { network: "mainnet".into(), rpc, http: reqwest::Client::new() }
+    }
+
     pub fn explorer_tx(&self, hash: &str) -> String {
         let host = if self.network == "mainnet" { "nearblocks.io" } else { "testnet.nearblocks.io" };
         format!("https://{host}/txns/{hash}")

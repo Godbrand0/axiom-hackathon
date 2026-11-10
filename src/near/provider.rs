@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use super::client::{fmt_near, sha256_hex, u128_field, Near, Signer};
 use super::{entry_known_at, job_request_hash, request_line, RecordEntry, REPORT_SERVICE, SEC_SERVICE, SIGNALS_SERVICE};
 use crate::data::sec::Sec;
+use crate::meme::{self, data::MemeData, MemeLedger, MEME_RISK_SERVICE, MEME_SIGNALS_SERVICE};
 use crate::store::Store;
 
 const MAX_RECEIPT_AGE_SECS: u64 = 15 * 60;
@@ -65,6 +66,7 @@ struct AppState {
     /// receipt id -> times redeemed.
     redeemed: Mutex<HashMap<u64, u32>>,
     tag: String,
+    meme: MemeData,
 }
 
 type Q = Query<HashMap<String, String>>;
@@ -109,6 +111,7 @@ pub async fn serve(cfg: SellerConfig) -> Result<()> {
         selling,
         redeemed: Mutex::new(HashMap::new()),
         tag: cfg.tag,
+        meme: MemeData::new(),
     });
     if let Some((signer, policy)) = cfg.bidding {
         for (kind, p) in &policy.prices {
@@ -123,6 +126,9 @@ pub async fn serve(cfg: SellerConfig) -> Result<()> {
         .route(&format!("/v1/{REPORT_SERVICE}"), get(report))
         .route(&format!("/v1/{SEC_SERVICE}"), get(sec_red_flags))
         .route("/v1/jobs/{id}", get(job_delivery))
+        .route("/v1/meme-track-record", get(meme_track_record))
+        .route(&format!("/v1/{MEME_SIGNALS_SERVICE}"), get(meme_signals))
+        .route(&format!("/v1/{MEME_RISK_SERVICE}"), get(meme_risk))
         .with_state(state.clone());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.port));
     println!("{}Seller {} on http://{addr} (payments via {})", state.tag, state.seller, state.contract);
@@ -145,6 +151,7 @@ async fn info(State(st): State<Arc<AppState>>) -> Response {
         "services": st.selling,
         "latest_signal_date": latest,
         "track_record": "/v1/track-record",
+        "meme_track_record": "/v1/meme-track-record",
         "jobs": "/v1/jobs/<id>?receipt=<n>",
         "note": "Signals are committed on-chain by the seller account before the next open. Past signals are free at /v1/track-record; fresh ones are paid.",
     }))
@@ -311,7 +318,87 @@ fn check_since(since: NaiveDate) -> Result<(), Response> {
     Ok(())
 }
 
+fn meme_signals_all(st: &AppState) -> Result<Vec<meme::MemeSignal>, Response> {
+    MemeLedger::open(&st.db_path).and_then(|l| l.all()).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+}
+
+fn parse_token(s: Option<&str>) -> Result<String, Response> {
+    let t = s.map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    let ok = !t.is_empty()
+        && t.len() <= 64
+        && t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(t)
+    } else {
+        Err(err(StatusCode::BAD_REQUEST, "token must be a NEAR account id, e.g. blackdragon.tkn.near"))
+    }
+}
+
+async fn meme_risk_for(st: &AppState, token: &str) -> Result<Value, Response> {
+    meme::risk_report(&st.meme, token).await.map_err(|e| err(StatusCode::BAD_GATEWAY, format!("risk screen failed: {e:#}")))
+}
+
 // ---------- paid calls ----------
+
+/// Free: memecoin signals whose holding window has ended, with what is needed to recompute hash and outcome.
+async fn meme_track_record(State(st): State<Arc<AppState>>) -> Response {
+    match meme_signals_all(&st) {
+        Ok(all) => Json(json!({
+            "seller": st.seller, "committer": st.seller, "contract": st.contract,
+            "rule": "Each signal is scored from the first hourly candle that starts after its on-chain commitment.",
+            "entries": meme::published(&all, Utc::now()),
+        }))
+        .into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Paid: committed memecoin signals still inside their holding window. `hour` is the current UTC hour.
+async fn meme_signals(State(st): State<Arc<AppState>>, Query(q): Q) -> Response {
+    let now = Utc::now();
+    let hour = q.get("hour").cloned().unwrap_or_default();
+    let valid = [now, now - TimeDelta::hours(1)].iter().any(|t| t.format("%Y-%m-%dT%H").to_string() == hour);
+    if !valid {
+        return err(StatusCode::BAD_REQUEST, format!("hour must be the current UTC hour, e.g. {}", now.format("%Y-%m-%dT%H")));
+    }
+    let active: Vec<_> = match meme_signals_all(&st) {
+        Ok(all) => all.into_iter().filter(|s| s.committed_at.is_some() && s.window_end() > now).collect(),
+        Err(r) => return r,
+    };
+    if active.is_empty() {
+        return err(StatusCode::NOT_FOUND, "no active memecoin signals right now");
+    }
+    if let Some(resp) = gate(&st, MEME_SIGNALS_SERVICE, &[&hour], &q).await {
+        return resp;
+    }
+    eprintln!("{}sold {} memecoin signal(s) (receipt #{})", st.tag, active.len(), q["receipt"]);
+    Json(json!({"seller": st.seller, "hour": hour, "signals": active, "note": "Not investment advice. Memecoins can go to zero."})).into_response()
+}
+
+/// Paid: rug-risk screen of one token, computed live. `date` is today (UTC).
+async fn meme_risk(State(st): State<Arc<AppState>>, Query(q): Q) -> Response {
+    let (token, date) = match (parse_token(q.get("token").map(String::as_str)), parse_date(q.get("date").map(String::as_str), "date")) {
+        (Ok(t), Ok(d)) => (t, d),
+        (Err(r), _) | (_, Err(r)) => return r,
+    };
+    if date != Utc::now().date_naive() {
+        return err(StatusCode::BAD_REQUEST, "date must be today (UTC): the screen is computed live");
+    }
+    let date_s = date.to_string();
+    if let Some(resp) = gate(&st, MEME_RISK_SERVICE, &[&token, &date_s], &q).await {
+        return resp;
+    }
+    match meme_risk_for(&st, &token).await {
+        Ok(body) => {
+            eprintln!("{}sold {token} risk screen (receipt #{})", st.tag, q["receipt"]);
+            Json(body).into_response()
+        }
+        Err(r) => {
+            release(&st, &q);
+            r
+        }
+    }
+}
 
 async fn signals(State(st): State<Arc<AppState>>, Query(q): Q) -> Response {
     let date = match parse_date(q.get("date").map(String::as_str), "date") {
@@ -389,6 +476,7 @@ pub enum JobTopic {
     Filings { symbol: String, since: NaiveDate },
     Signals { date: NaiveDate },
     Report { symbol: String, date: NaiveDate },
+    MemeRisk { token: String },
 }
 
 impl JobTopic {
@@ -400,6 +488,7 @@ impl JobTopic {
             [k, s, d] if *k == SEC_SERVICE => Some(Self::Filings { symbol: sym(s)?, since: date(d)? }),
             [k, d] if *k == SIGNALS_SERVICE => Some(Self::Signals { date: date(d)? }),
             [k, s, d] if *k == REPORT_SERVICE => Some(Self::Report { symbol: sym(s)?, date: date(d)? }),
+            [k, t] if *k == MEME_RISK_SERVICE => Some(Self::MemeRisk { token: parse_token(Some(t)).ok()? }),
             _ => None,
         }
     }
@@ -409,6 +498,7 @@ impl JobTopic {
             Self::Filings { .. } => SEC_SERVICE,
             Self::Signals { .. } => SIGNALS_SERVICE,
             Self::Report { .. } => REPORT_SERVICE,
+            Self::MemeRisk { .. } => MEME_RISK_SERVICE,
         }
     }
 }
@@ -419,6 +509,7 @@ fn can_deliver(st: &AppState, t: &JobTopic) -> bool {
         JobTopic::Filings { since, .. } => st.sec.is_some() && check_since(*since).is_ok(),
         JobTopic::Signals { date } => matches!(signals_for(st, *date), Ok(Some(_))),
         JobTopic::Report { symbol, date } => matches!(report_paths(st, symbol, *date), Ok(p) if !p.is_empty()),
+        JobTopic::MemeRisk { .. } => true,
     }
 }
 
@@ -430,6 +521,7 @@ async fn produce(st: &AppState, t: &JobTopic) -> Result<Value, Response> {
             let paths = report_paths(st, symbol, *date)?;
             read_reports(st, symbol, *date, paths)
         }
+        JobTopic::MemeRisk { token } => meme_risk_for(st, token).await,
     }
 }
 
@@ -570,5 +662,7 @@ mod tests {
         assert_eq!(JobTopic::parse("axiom-report|XOM"), None);
         assert_eq!(JobTopic::parse("sec-red-flags|J PM|2026-10-10"), None);
         assert_eq!(JobTopic::parse("weather|NYC|2026-10-10"), None);
+        assert_eq!(JobTopic::parse("meme-risk|BlackDragon.tkn.near"), Some(JobTopic::MemeRisk { token: "blackdragon.tkn.near".into() }));
+        assert_eq!(JobTopic::parse("meme-risk|bad token"), None);
     }
 }

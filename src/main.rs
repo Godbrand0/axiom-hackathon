@@ -5,6 +5,7 @@ mod data;
 mod factors;
 mod fundamentals;
 mod indicators;
+mod meme;
 mod models;
 mod momentum;
 mod near;
@@ -114,6 +115,14 @@ enum Cmd {
         index: String,
         #[arg(long, default_value = "config/sp500.txt")]
         out: String,
+    },
+    /// Memecoin research on NEAR: rug-risk screens, momentum signals committed on-chain, verification.
+    Meme {
+        /// Sign as this account (for --near commitments and buying).
+        #[arg(long = "as", global = true)]
+        as_account: Option<String>,
+        #[command(subcommand)]
+        cmd: meme::cli::MemeCmd,
     },
     /// Axiom Pay on NEAR: agent budget and policy, paid evidence providers, on-chain signal commitments.
     Near {
@@ -321,13 +330,17 @@ async fn main() -> Result<()> {
     if let Cmd::Universe { index, out } = &cli.cmd {
         return universe::download(index, out).await; // needs no API keys
     }
+    if let Cmd::Meme { as_account, cmd } = cli.cmd {
+        let _ = dotenvy::dotenv();
+        return meme::cli::run(as_account.as_deref(), cmd).await; // public data only, no market-data keys
+    }
     if let Cmd::Near { as_account, cmd } = cli.cmd {
         let _ = dotenvy::dotenv();
         return near_cmd(as_account.as_deref(), cmd).await; // needs no market-data keys
     }
     let cfg = Config::from_env()?;
     match cli.cmd {
-        Cmd::Universe { .. } | Cmd::Near { .. } => unreachable!(),
+        Cmd::Universe { .. } | Cmd::Near { .. } | Cmd::Meme { .. } => unreachable!(),
         Cmd::Scan { watchlist, symbols, years, no_llm, no_telegram, cost_bps, near } => {
             let (symbols, added) = resolve_symbols(&watchlist, symbols)?;
             scan(&cfg, &symbols, &added, years, !no_llm, !no_telegram, cost_bps, near).await
@@ -1241,6 +1254,8 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                     near::SIGNALS_SERVICE => "Axiom: one session's fresh signals (entry/stop/target), committed on-chain before the open",
                     near::REPORT_SERVICE => "Axiom: full cited bull/bear research report for one symbol and session",
                     near::SEC_SERVICE => "Recent SEC filings for a ticker with 8-K red-flag item codes",
+                    meme::MEME_SIGNALS_SERVICE => "Axiom: active NEAR memecoin breakout signals, each committed on-chain before sale",
+                    meme::MEME_RISK_SERVICE => "Axiom: live rug-risk screen of one NEAR token (liquidity, age, holders, churn, copycats)",
                     _ => "",
                 }
                 .to_string()

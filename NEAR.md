@@ -38,6 +38,17 @@ Checked on testnet: an agent key calling `set_policy` is rejected with `MethodNa
 
 `axiom near swarm` runs the whole economy in one process: it starts each seller agent's server and bidding loop, has buyer agents hire them round by round, then has the buyers pool a purchase from Axiom.
 
+### Memecoin research: signals whose outcomes the buyer recomputes
+
+`axiom meme scan` researches NEAR memecoins the way Axiom researches stocks, and sells the result the same way.
+
+- **Discovery.** The most-traded and newest NEAR pools on GeckoTerminal, plus seed tokens (`config/memecoins.txt`). Stablecoins, bridged assets (including tokenized stocks) and NEAR Intents entries are dropped; NEAR Intents "pools" report solver reserves, not an AMM's (BLACKDRAGON shows $64M there and $40K in its real Rhea pool).
+- **Rug-risk screen** (`meme-risk`, 0.005 NEAR): thin liquidity, pool age, top-10 holder share of circulating supply (FastNEAR's holder index, the token's own `ft_total_supply`, burned supply and DEX/bridge contracts excluded), volume far above liquidity (churn or wash trading), sells outnumbering buys, extreme 24h moves, and **copycats**: other tokens trading under the same ticker.
+- **Breakout signal** (`meme-signals`, 0.01 NEAR): the last closed hour closes above the previous 72 hours' high on more than twice the usual daily volume. Stop 3 hourly ATRs below (8–30%), target twice the risk, 72-hour limit. High-risk tokens get no signal.
+- **Committed before sale.** Each signal's hash (`axiom-meme/v1|token|pool|setup|time|entry|stop|target|hours`) is committed on-chain; only committed signals are sold.
+
+Why this record is stronger than the stock one: memecoin prices are public. **A signal is scored from the first hourly candle that starts after its on-chain commitment**, so the seller gets no head start, and `axiom meme verify` recomputes every outcome from GeckoTerminal itself instead of trusting the seller's numbers. It also counts the seller's memecoin commitments that were never revealed, so a seller that hides its losers is caught.
+
 ### Why the track record can be trusted
 
 1. When Axiom produces a signal, it computes `sha256("axiom-signal/v1|SYMBOL|setup|date|entry|stop|target|max_hold")` and calls `commit` before the next open (13:30 UTC on the next weekday).
@@ -169,6 +180,15 @@ Swarm runs on 10 Nov 2026 (`axiom near jobs`, `axiom near pools` list them):
 | Jobs #3 to #5 (AAPL, MSFT, TSLA) | edgar is still cheapest but now has more disputes than deliveries, so the buyers hire quill (0.015) instead; 3 deliveries confirmed | [6spNmuf9…](https://testnet.nearblocks.io/txns/6spNmuf9H4N5hwqK2Czu1kqVu9A6JPqvp225c1xjwUKC) |
 | Agent key calls `set_policy` / attaches NEAR | rejected by the protocol: `MethodNameMismatch` / `DepositWithFunctionCall` | (rejected before execution) |
 
+Memecoin research, 10 Nov 2026:
+
+| What | Result | Tx |
+|---|---|---|
+| `meme scan`: 20 NEAR memecoins screened | MLC (+58% in 24h, launched 17 h earlier, $62K traded on $6.5K liquidity, a second token also called MLC) rated **high**; SHITZU, BLACKDRAGON, NEKO, LONK **low**; no breakout that hour | (off-chain) |
+| `meme backtest` over ~1,000 hourly candles per token | 12 trades, 6 wins, +4.8% mean after 1% costs. Too few trades to mean much, and only tokens still alive today are tested. | (off-chain) |
+| Buyer bot buys SINU's risk screen, 0.005 NEAR | high (70): one wallet holds nearly all circulating supply, thin liquidity | [BpAJnaH8…](https://testnet.nearblocks.io/txns/BpAJnaH8dJZ967iuprfZ9h3LqZUJx1xyPnJwVVmpzcZ2) |
+| Restricted agent `scout` posts job `meme-risk\|token.lonkingnearbackto2024.near`; Axiom bids 0.006 automatically | awarded, delivered (low, 10), confirmed | [8FQMiDzL…](https://testnet.nearblocks.io/txns/8FQMiDzLsjDNMaFqNEKeDBwweD5HQK9wYy227YSvGogX) |
+
 An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on-chain cap enforcement, price-change re-approval, receipt replay, and ledger-tamper detection. Those behaviours carry over and are covered by the unit tests.
 
 ## Website
@@ -184,7 +204,10 @@ An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on
 | Buying, track-record verification | [src/near/mod.rs](src/near/mod.rs) |
 | Seller server (signals, reports, SEC evidence, free track record, job delivery, automatic bidding) | [src/near/provider.rs](src/near/provider.rs) |
 | Swarm: hiring by bid with reputation, pooled purchases, the demo economy | [src/near/swarm.rs](src/near/swarm.rs) |
+| Memecoin research: discovery, risk screen, breakout signal, outcome scoring, verification | [src/meme/mod.rs](src/meme/mod.rs), [src/meme/data.rs](src/meme/data.rs), [src/meme/cli.rs](src/meme/cli.rs) |
 | CLI (`axiom near …`) and the `scan --near` hook | [src/main.rs](src/main.rs) |
+
+`axiom meme` commands: `scan [--near]`, `risk <token> [--seller]`, `backtest`, `verify`, `shop`, `export-record`.
 
 `axiom near` commands: `create-account`, `deploy [--no-init|--migrate]`, `status`, `agent-create`, `agents`, `agent-sweep`, `fund-storage`, `hire`, `jobs`, `pools`, `swarm`, `open-wallet`, `fund`, `policy`, `register`, `approve`, `revoke`, `receipts`, `serve [--bid KIND=NEAR]`, `buy`, `shop`, `check-seller`, `commit-signals`, `verify`, `export-record`.
 
@@ -192,7 +215,8 @@ An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on
 
 ```bash
 cargo test                  # agent: Borsh layout (incl. create-account and restricted keys), keys, NEAR amounts,
-                            # signal/request/job hashing, receipt checks, job topics, bid choice
+                            # signal/request/job hashing, receipt checks, job topics, bid choice; memecoins:
+                            # breakout rule, outcome paths, signal line, risk flags, gap filling, token classes
 cd contract && cargo test   # contract (27): wallet isolation, approvals at price, caps, budget, hijack, commitments,
                             # fleets, storage credit, job bidding/award/confirm, pools fill/refund/approval
 ```
@@ -203,6 +227,9 @@ cd contract && cargo test   # contract (27): wallet isolation, approvals at pric
 - **Payments are native NEAR.** Paying sellers in USDC or other assets through NEAR Intents is the natural next step; it is mainnet-only, so it was left out of this build.
 - **Returns are self-reported.** The chain proves when a signal existed; the profit/loss figures are the seller's paper-trade accounting. A buyer can recompute them from public prices.
 - **A seller could withhold signals it never committed.** Committed signals are numbered on-chain, but a seller that never commits a signal leaves no trace.
+- **NEAR's memecoin market is small.** On 10 Nov 2026, 20 tokens had more than $2K of liquidity, most of them launched that day; the largest pool held about $48K. Breakouts are rare, and the backtest has only 12 trades.
+- **Memecoin signals are untested live.** No breakout fired during the build, so no memecoin signal has been committed, sold and verified on testnet yet; `meme verify` has only run against an empty record. `axiom meme scan --near` run hourly will produce the first ones.
+- **Data comes from GeckoTerminal and FastNEAR.** Outcomes are recomputed from GeckoTerminal's candles, which aggregate on-chain swaps; a buyer could read the pool contract directly instead.
 - **Disputes are the buyer's word.** `confirm(delivered=false)` records what the buyer says; a dishonest buyer can dispute a good delivery. It still paid, so disputing has a price, but a seller cannot appeal on-chain yet.
 - **Pool receipts are honoured once per member by count**, not per member identity: the seller cannot tell which member is calling over plain HTTP. A signed request from the member's key would fix this.
 - **Job sellers here are local processes.** Their endpoints are `127.0.0.1` URLs, so the swarm runs on one machine; on a server, `--endpoint` takes a public URL.

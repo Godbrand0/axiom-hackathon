@@ -1,0 +1,6 @@
+# NEAR memecoins always screened by `axiom meme scan`, on top of the most active and newest pools.
+# One NEP-141 token account per line.
+blackdragon.tkn.near
+token.0xshitzu.near
+token.lonkingnearbackto2024.near
+ftv2.nekotoken.near
