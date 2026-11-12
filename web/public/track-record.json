@@ -1,8 +1,35 @@
 {
   "committer": "axiom-agent-33945.testnet",
   "contract": "axiom-market-33945.testnet",
-  "entries": [],
-  "generated_at": "2026-11-10T02:20:30.369201Z",
+  "entries": [
+    {
+      "as_of": "2026-11-09",
+      "entry": 339.69,
+      "exit_date": null,
+      "fill_date": null,
+      "max_hold": 20,
+      "ret": null,
+      "setup": "trend-pullback",
+      "status": "open",
+      "stop": 323.9929349919758,
+      "symbol": "JPM",
+      "target": 371.08413001604845
+    },
+    {
+      "as_of": "2026-11-09",
+      "entry": 164.65,
+      "exit_date": null,
+      "fill_date": null,
+      "max_hold": 10,
+      "ret": null,
+      "setup": "rsi2-pullback",
+      "status": "open",
+      "stop": 150.79700185161116,
+      "symbol": "XOM",
+      "target": 178.50299814838885
+    }
+  ],
+  "generated_at": "2026-11-12T02:30:11.303215Z",
   "network": "testnet",
   "seller": "axiom-agent-33945.testnet"
 }
