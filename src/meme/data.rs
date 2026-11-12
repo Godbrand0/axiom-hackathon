@@ -47,6 +47,8 @@ pub struct Holders {
     /// DEX/farm contracts.
     pub top10_share: f64,
     pub largest: Vec<(String, f64)>,
+    /// Wallets with a non-zero balance outside DEX/farm contracts (FastNEAR's list is capped, so "at least").
+    pub wallets: usize,
 }
 
 pub struct MemeData {
@@ -193,14 +195,15 @@ impl MemeData {
             let bal: f64 = a["balance"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
             if is_burn(id) {
                 burned += bal;
-            } else if !is_pool_contract(id) {
+            } else if !is_pool_contract(id) && bal > 0.0 {
                 holders.push((id.to_string(), bal));
             }
         }
         let circulating = (supply - burned).max(1.0);
+        let wallets = holders.len();
         holders.truncate(10);
         let largest: Vec<(String, f64)> = holders.iter().map(|(id, b)| (id.clone(), b / circulating)).collect();
-        Ok(Holders { top10_share: largest.iter().map(|x| x.1).sum(), largest })
+        Ok(Holders { top10_share: largest.iter().map(|x| x.1).sum(), largest, wallets })
     }
 }
 

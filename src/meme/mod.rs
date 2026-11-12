@@ -29,6 +29,8 @@ pub const LABEL: &str = "axiom-meme/v1";
 /// Round-trip cost assumed per trade: DEX fees (0.3% each way on Rhea) plus slippage on thin pools.
 pub const COST: f64 = 0.01;
 pub const MAX_HOLD_H: u32 = 72;
+/// Fewer holders than this outside pools is a ghost token, whatever its concentration.
+pub const MIN_WALLETS: usize = 25;
 
 // ---------- risk ----------
 
@@ -77,6 +79,11 @@ pub fn assess(pool: &Pool, holders: Option<&Holders>, now: DateTime<Utc>) -> Ris
             score += 10;
             flags.push("holder data unavailable".into());
         }
+    }
+    // Low concentration means little when almost nobody holds the token outside its pool.
+    if let Some(h) = holders.filter(|h| h.wallets < MIN_WALLETS) {
+        score += 15;
+        flags.push(format!("only {} wallet(s) hold it outside pools", h.wallets));
     }
     if liq > 0.0 && pool.volume_24h > 10.0 * liq {
         score += 15;
@@ -563,10 +570,32 @@ mod tests {
             sells_24h: 40,
             created: Some(Utc::now() - TimeDelta::hours(12)),
         };
-        let h = Holders { top10_share: 0.7, largest: vec![] };
+        let h = Holders { top10_share: 0.7, largest: vec![], wallets: 500 };
         let r = assess(&pool, Some(&h), Utc::now());
         assert_eq!(r.level, "high");
         assert_eq!(r.score, 100);
         assert_eq!(r.flags.len(), 6);
+    }
+
+    #[test]
+    fn flags_ghost_tokens() {
+        let pool = Pool {
+            address: "x".into(),
+            token: "x.near".into(),
+            symbol: "X".into(),
+            dex: "rhea".into(),
+            price_usd: 1.0,
+            liquidity_usd: 50_000.0,
+            volume_24h: 1_000.0,
+            change_24h: 0.0,
+            buys_24h: 5,
+            sells_24h: 5,
+            created: Some(Utc::now() - TimeDelta::days(60)),
+        };
+        // Nearly all supply in the pool: concentration looks tiny, but only two wallets hold any.
+        let h = Holders { top10_share: 0.003, largest: vec![], wallets: 2 };
+        let r = assess(&pool, Some(&h), Utc::now());
+        assert_eq!((r.score, r.flags.len()), (15, 1));
+        assert!(r.flags[0].contains("only 2 wallet"));
     }
 }
