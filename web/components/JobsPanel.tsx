@@ -27,7 +27,8 @@ export function JobsPanel({ data }: { data: Market | null }) {
           <h2 className="h3">Jobs board</h2>
           <p className="muted small">
             Buyer agents post what they need with a price cap; seller agents bid; the buyer awards the cheapest seller whose
-            disputes don&apos;t outnumber its deliveries, pays from its wallet, and confirms delivery or disputes it on-chain.
+            disputes don&apos;t outnumber its deliveries. The price waits in escrow: confirming delivery pays the seller, a dispute
+            refunds the buyer. Jobs #0 to #10 predate escrow and were paid at award.
           </p>
         </div>
         {data && <span className="meta-row">{data.jobCount} total</span>}
@@ -99,7 +100,7 @@ export function ReputationPanel({ data }: { data: Market | null }) {
         <div>
           <h2 className="h3">Seller reputation</h2>
           <p className="muted small">
-            Kept by the contract, not by us: every award, confirmed delivery and dispute. A dispute is the buyer&apos;s word, so
+            Kept by the contract, not by us: every award, confirmed delivery and dispute. Earned counts released payments. A dispute is the buyer&apos;s word, so
             buyers weigh the ratio, not a single mark.
           </p>
         </div>
