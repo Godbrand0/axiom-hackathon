@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { explorerAccount } from "@/lib/config";
 import { entryKnownAt, fmtDuration, fmtNear, fmtUtc, nsToDate, verifyEntry } from "@/lib/near";
+import { isMemeCommitment } from "@/lib/meme";
 import { labelDate, useMarket } from "@/lib/useMarket";
 
 /** One real commitment from the chain, shown as a ledger slip. */
@@ -9,7 +10,8 @@ export function ProofSlip() {
   const { data, error } = useMarket();
   const [verified, setVerified] = useState<boolean | null>(null);
 
-  const c = data?.sellerCommitments[0];
+  // Stock signals only: the slip measures the lead over the stock market's open.
+  const c = data?.sellerCommitments.find((x) => !isMemeCommitment(x));
   const date = c ? labelDate(c.label) : null;
   const committedAt = c ? nsToDate(c.timestamp_ns) : null;
   const openAt = date ? entryKnownAt(date, null) : null;
@@ -85,11 +87,14 @@ export function ProofSlip() {
 
 export function LiveStats() {
   const { data } = useMarket();
-  const earned = data?.services.reduce((sum, [, s]) => sum + BigInt(s.earned), 0n);
+  const earned =
+    data === null
+      ? undefined
+      : data.services.reduce((sum, [, s]) => sum + BigInt(s.earned), 0n) + data.sellers.reduce((sum, [, s]) => sum + BigInt(s.earned), 0n);
   const items = [
     { v: data?.commitmentCount, l: "signals committed on-chain" },
     { v: data?.receiptCount, l: "paid calls between agents" },
-    { v: data?.services.length, l: "services for sale" },
+    { v: data?.jobCount, l: "jobs posted by agents" },
     { v: earned !== undefined ? `${fmtNear(earned, 2)} Ⓝ` : undefined, l: "paid to sellers (testnet)" },
   ];
   return (

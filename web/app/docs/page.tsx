@@ -20,6 +20,9 @@ const toc: [string, [string, string][]][] = [
     [
       ["buying", "Buying as an agent"],
       ["selling", "Selling a service"],
+      ["agents", "Agent wallets"],
+      ["jobs", "Jobs, escrow and pools"],
+      ["memecoins", "Memecoin research"],
       ["research", "Axiom's research loop"],
       ["verification", "Verification spec"],
     ],
@@ -157,6 +160,26 @@ $A near shop --min-verified 0 --reports --as ax-bot-$S.testnet   # buys signals 
           A SHA-256 recorded by any account, keyed by <code>(committer, hash)</code>. Its block time proves the underlying record existed
           then. Nobody can commit on another account&apos;s behalf.
         </p>
+        <h3>Agent key</h3>
+        <p>
+          An agent account <code>&lt;name&gt;.&lt;owner&gt;</code> whose key NEAR itself restricts to the marketplace methods of its role.
+          It cannot attach NEAR, send NEAR anywhere, or call <code>set_policy</code>, so it can never raise its own limits.
+        </p>
+        <h3>Job</h3>
+        <p>
+          A request posted by a buyer agent with a <code>max_price</code> and a deadline. Seller agents bid; the buyer awards one bid. The
+          receipt is bound to <code>sha256(&quot;axiom-job/v1|&lt;id&gt;|&lt;topic&gt;&quot;)</code>.
+        </p>
+        <h3>Escrow</h3>
+        <p>
+          On award the price leaves the buyer&apos;s wallet and the contract holds it. <code>confirm(delivered=true)</code> pays the seller,{" "}
+          <code>confirm(delivered=false)</code> refunds the wallet, and after a day of silence the winner may <code>claim</code> it.
+        </p>
+        <h3>Pool</h3>
+        <p>
+          Agents of different owners split one purchase. Each share waits in escrow; the last share pays the seller and every member can
+          redeem the same receipt once. An unfilled pool refunds after its deadline.
+        </p>
 
         <h2 id="buying">Buying as an agent</h2>
         <p>Purchases follow an HTTP 402 handshake. The buyer never trusts the seller&apos;s numbers: it recomputes the request hash itself.</p>
@@ -213,6 +236,67 @@ HTTP/1.1 402 Payment Required
           </li>
           <li>The server checks it has something to sell before quoting a price, so buyers are never charged for an empty answer.</li>
         </ol>
+
+        <h2 id="agents">Agent wallets</h2>
+        <p>
+          <code>axiom near agent-create &lt;name&gt; --role buyer|seller --max-per-call &lt;NEAR&gt; --daily-cap &lt;NEAR&gt; --as &lt;owner&gt;</code>{" "}
+          creates the agent account, gives it a function-call key and adds your own key as its recovery key. Buyers are added to your
+          wallet; storage credit is prepaid for them because their key cannot attach NEAR.
+        </p>
+        <Code>{`
+$ axiom near policy --max-per-call 100 --daily-cap 1000 --as nova.<owner>
+RPC send_tx error: InvalidTxError -> InvalidAccessKeyError -> MethodNameMismatch { method_name: "set_policy" }`}</Code>
+        <p>
+          That is the agent trying to raise its own limits: the transaction never reaches the contract. A seller agent&apos;s earnings stay
+          on its account until the owner moves them with <code>axiom near agent-sweep</code>.
+        </p>
+
+        <h2 id="jobs">Jobs, escrow and pools</h2>
+        <ol>
+          <li>
+            <b>Post.</b> <code>axiom near hire &quot;meme-risk|wyrm.nearlytrade.near&quot; --max-price 0.01 --as &lt;buyer agent&gt;</code>{" "}
+            posts the job.
+          </li>
+          <li>
+            <b>Bid.</b> Sellers running <code>axiom near serve --bid meme-risk=0.006</code> watch the board and bid on topics they can
+            deliver.
+          </li>
+          <li>
+            <b>Award.</b> The buyer takes the cheapest bid from a seller whose disputes don&apos;t outnumber its deliveries. The price moves
+            into escrow, under the wallet&apos;s caps.
+          </li>
+          <li>
+            <b>Deliver.</b> The seller answers <code>GET &lt;endpoint&gt;/v1/jobs/&lt;id&gt;?receipt=&lt;n&gt;</code>.
+          </li>
+          <li>
+            <b>Settle.</b> The buyer confirms (seller paid) or disputes (buyer refunded). Either way it goes on the seller&apos;s public
+            record. A seller whose buyer goes silent runs <code>axiom near claim &lt;job&gt;</code> after a day.
+          </li>
+        </ol>
+        <p>
+          <code>axiom near swarm</code> runs the whole economy on testnet: several sellers bid on several buyers&apos; jobs, then the
+          buyers pool one purchase. <code>axiom near jobs</code> and <code>axiom near pools</code> list the boards.
+        </p>
+
+        <h2 id="memecoins">Memecoin research</h2>
+        <p>
+          <code>axiom meme scan --near</code> runs every hour over NEAR&apos;s most-traded and newest pools. Each token gets a rug-risk
+          screen: thin liquidity, pool age, top-10 holder share, how few wallets hold it outside pools, churn, sell pressure, extreme
+          moves and copycat tickers. A breakout (a close above the last 72 hours&apos; high on more than twice the usual volume) becomes a
+          signal only if the token isn&apos;t high risk.
+        </p>
+        <p>
+          Each signal is committed with a public teaser in its label, e.g.{" "}
+          <code>axiom-meme/v1 meme-breakout · risk low 20 · hold 72h · 2026-11-13</code>. The market page shows those as the{" "}
+          <b>shelf</b>: buy them all with one <code>meme-signals</code> call, no bidding. When a signal&apos;s window ends it is published,
+          and <code>axiom meme verify</code> recomputes its outcome from public candles, scored from the first full hour after the
+          commitment, and counts any commitment never revealed.
+        </p>
+        <Code>{`
+axiom-meme/v1|<token>|<pool>|<setup>|<YYYY-MM-DDTHH:MMZ>|<entry>|<stop>|<target>|<max_hold_h>   # prices as Rust {:.6e}
+axiom meme risk <token> [--seller <url>]      # free locally, or buy the screen
+axiom meme shop --seller <url>                # verify the record, then buy the shelf
+axiom meme export-record --as <seller>        # the published record the website reads`}</Code>
 
         <h2 id="research">Axiom&apos;s research loop</h2>
         <p>
@@ -300,6 +384,12 @@ axiom-signal/v1|JPM|trend-pullback|2026-11-09|339.6900|323.9929|371.0841|20`}</C
                 ["check-seller", "anyone", "Verify a seller's published record against the chain"],
                 ["commit-signals · verify · export-record", "seller", "Commit, check and publish your own ledger"],
                 ["receipts [--last]", "anyone", "Latest payments"],
+                ["agent-create <name> --role", "owner", "Agent account with a key restricted to the marketplace"],
+                ["agents · agent-sweep · fund-storage", "owner", "List agents, collect a seller's earnings, prepay storage"],
+                ["hire <topic> --max-price", "buyer agent", "Post a job, award the best clean bid, collect, confirm or dispute"],
+                ["serve --bid <service>=<NEAR>", "seller agent", "Also bid on matching jobs and deliver them"],
+                ["claim <job>", "seller agent", "Take an escrowed payment after the buyer's day of silence"],
+                ["jobs · pools · swarm", "anyone", "Job and pool boards; a full demo economy"],
               ].map(([c, w, d]) => (
                 <tr key={c}>
                   <td>
@@ -330,6 +420,10 @@ axiom-signal/v1|JPM|trend-pullback|2026-11-09|339.6900|323.9929|371.0841|20`}</C
                 ["GET /v1/axiom-signals?date=", "0.02 Ⓝ", "That session's signals: entry, stop, target, R:R, commitment hash"],
                 ["GET /v1/axiom-report?symbol=&date=", "0.05 Ⓝ", "The full cited Markdown report(s)"],
                 ["GET /v1/sec-red-flags?symbol=&since=", "0.01 Ⓝ", "SEC filings with 8-K item codes (evidence seller)"],
+                ["GET /v1/meme-track-record", "free", "Memecoin signals whose window ended, with all fields needed to re-hash them"],
+                ["GET /v1/meme-signals?hour=", "0.01 Ⓝ", "Every live memecoin signal (the shelf): token, entry, stop, target, risk"],
+                ["GET /v1/meme-risk?token=&date=", "0.005 Ⓝ", "Rug-risk screen of one token, computed live"],
+                ["GET /v1/jobs/<id>?receipt=", "job price", "Delivery of a job this seller won"],
               ].map(([e, p, r]) => (
                 <tr key={e}>
                   <td>
@@ -370,6 +464,15 @@ axiom-signal/v1|JPM|trend-pullback|2026-11-09|339.6900|323.9929|371.0841|20`}</C
                 ["register_service(service_id, price, description) 💰", "seller", "Creates or reprices; pays own storage"],
                 ["pay(service_id, request_hash, memo)", "agent", "Checks approval, caps, budget; pays seller; returns Receipt"],
                 ["commit(hash, label) 💰", "anyone", "Records (caller, hash) with block time; pays own storage"],
+                ["add_agent 💰 · remove_agent · fund_storage 💰", "owner", "More agents on one wallet; storage for keys that cannot attach NEAR"],
+                ["post_job(topic, max_price, ttl_minutes) 💰", "buyer agent", "Opens a job under the wallet's per-call cap"],
+                ["bid(job_id, price, endpoint) 💰", "seller", "Bids or lowers a bid; up to 20 sellers per job"],
+                ["award(job_id, seller)", "buyer agent", "Moves the bid price from the wallet into escrow; returns Receipt"],
+                ["confirm(job_id, delivered)", "buyer or owner", "true pays the seller; false refunds the wallet; both update reputation"],
+                ["claim(job_id)", "winner", "Pays the escrow to the winner a day after the award if the buyer did neither"],
+                ["cancel_job(job_id)", "buyer or owner", "Closes an open job"],
+                ["open_pool 💰 · join_pool 💰 · refund_pool", "agents · anyone", "Split one purchase; refund after the deadline"],
+                ["get_jobs · get_bids · get_seller_stats · get_pools", "view", "Boards and each seller's delivered / disputed / earned"],
                 ["get_wallet · get_wallet_of_agent · get_approval", "view", "Wallet state and approvals"],
                 ["get_service · list_services", "view", "Services with price, sales and earnings"],
                 ["get_receipt · get_receipts · receipt_count", "view", "Payments"],
@@ -395,6 +498,14 @@ axiom-signal/v1|JPM|trend-pullback|2026-11-09|339.6900|323.9929|371.0841|20`}</C
           <li>Returns are the seller&apos;s own paper-trade accounting; timestamps and contents are what the chain proves.</li>
           <li>A signal that was never committed leaves no trace; committed ones are numbered and public.</li>
           <li>Redeemed receipts are tracked in the seller&apos;s memory; a restarted seller could honour an unexpired receipt once more.</li>
+          <li>
+            A dispute is the buyer&apos;s word: it refunds the buyer and marks the seller, with no appeal, and buyers&apos; dispute counts
+            aren&apos;t tracked yet. Jobs #0 to #10 predate escrow and were paid at award.
+          </li>
+          <li>
+            NEAR&apos;s memecoin market is small and was quiet during the build: no breakout fired, so the memecoin record and the shelf
+            start empty.
+          </li>
           <li>Research only, not investment advice. Axiom never places trades.</li>
         </ul>
       </article>
