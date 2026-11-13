@@ -17,6 +17,7 @@ import {
 import { labelDate, useMarket } from "@/lib/useMarket";
 import { isMemeCommitment } from "@/lib/meme";
 import MemePanel from "@/components/MemePanel";
+import ShelfPanel from "@/components/ShelfPanel";
 import { JobsPanel, PoolsPanel, ReputationPanel } from "@/components/JobsPanel";
 
 type Row = { e: RecordEntry; hash?: string; check?: Check; c?: Commitment | null; err?: string };
@@ -213,6 +214,7 @@ export default function MarketPage() {
         )}
       </div>
 
+      <ShelfPanel data={data} />
       <MemePanel data={data} />
 
       <JobsPanel data={data} />

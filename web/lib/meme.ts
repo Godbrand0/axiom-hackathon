@@ -67,3 +67,22 @@ export function fmtPrice(x: number): string {
   if (x >= 0.01) return x.toPrecision(4);
   return x.toExponential(3).replace("e+", "e");
 }
+
+/** Public teaser carried in a memecoin commitment's label (signals committed from 13 Nov 2026 on). */
+export type MemeTeaser = { setup: string; level: string; score: number; holdH: number };
+
+/** "axiom-meme/v1 breakout · risk low 20 · hold 72h · 2026-11-13" -> teaser; older labels carry only the date. */
+export function parseMemeLabel(label: string): MemeTeaser | null {
+  const m = label.match(/^axiom-meme\/v1 (\S+) · risk (\S+) (\d+) · hold (\d+)h · /);
+  return m ? { setup: m[1], level: m[2], score: Number(m[3]), holdH: Number(m[4]) } : null;
+}
+
+export const DEFAULT_HOLD_H = 72;
+
+/** End of a sealed signal's holding window: the first full hour after the commitment, plus the hold. */
+export function memeWindowEnd(c: Commitment): Date {
+  const hold = parseMemeLabel(c.label)?.holdH ?? DEFAULT_HOLD_H;
+  const at = nsToDate(c.timestamp_ns).getTime();
+  const nextHour = Math.floor(at / 3_600_000) * 3_600_000 + 3_600_000;
+  return new Date(nextHour + hold * 3_600_000);
+}

@@ -12,8 +12,9 @@
 //!   time proves it existed before its outcome. Buyers use a seller's commitments to verify its track record
 //!   before paying for new signals.
 //! * **Jobs (swarm bidding).** A buyer agent posts a job with a maximum price; seller agents bid; the buyer
-//!   awards one bid and pays it from its wallet under the same caps. The buyer then confirms delivery or
-//!   disputes it, which builds each seller's on-chain delivery record.
+//!   awards one bid, which moves the price from its wallet (under the same caps) into escrow. The buyer then
+//!   confirms delivery, which pays the seller, or disputes it, which refunds the wallet. Either way the seller's
+//!   on-chain delivery record is updated. If the buyer does neither within a day, the seller may claim the payment.
 //! * **Pools (collective purchase).** Several agents split one purchase. Each share is debited from its own
 //!   wallet into escrow; when the last share arrives the seller is paid and every member may redeem the
 //!   receipt. An unfilled pool is refunded to the wallets after its deadline.
@@ -30,6 +31,8 @@ const MAX_TEXT_LEN: usize = 280;
 const MIN_STORAGE_FUNDING: u128 = 10_000_000_000_000_000_000_000; // 0.01 NEAR
 const MAX_POOL_SHARES: u32 = 10;
 const MAX_BIDS_PER_JOB: usize = 20;
+/// After this long without a confirm or dispute, the winner of a job may claim the escrowed payment.
+const CLAIM_AFTER_NS: u64 = NANOS_PER_DAY;
 
 /// Storage prefixes. New variants are only ever appended, so existing data keeps its prefix across upgrades.
 #[near]
@@ -488,7 +491,7 @@ impl AxiomPay {
         let s = self.services.get_mut(&service_id).unwrap();
         s.calls += 1;
         s.earned = U128(s.earned.0 + svc.price.0);
-        self.settle(service_id, svc.provider, agent, owner, svc.price.0, request_hash, memo)
+        self.settle(service_id, svc.provider, agent, owner, svc.price.0, request_hash, memo, true)
     }
 
     /// Posts a job for sellers to bid on. `max_price` must fit the wallet's per-call cap.
@@ -520,7 +523,8 @@ impl AxiomPay {
         job
     }
 
-    /// Awards a job to `seller`'s bid and pays it from the caller's wallet (per-call cap, daily cap, budget).
+    /// Awards a job to `seller`'s bid. The price leaves the caller's wallet (per-call cap, daily cap, budget) and is
+    /// held in escrow until the buyer confirms or disputes, or the seller claims it after `CLAIM_AFTER_NS`.
     pub fn award(&mut self, job_id: u64, seller: AccountId) -> Receipt {
         let buyer = env::predecessor_account_id();
         let job = self.job(job_id).clone();
@@ -541,6 +545,7 @@ impl AxiomPay {
             bid.price.0,
             job_request_hash(job_id, &job.topic),
             job.topic.chars().take(MAX_TEXT_LEN).collect(),
+            false,
         );
         let j = self.jobs.get_mut(job_id as u32).unwrap();
         j.status = JobStatus::Awarded;
@@ -549,26 +554,43 @@ impl AxiomPay {
         j.receipt = Some(receipt.id);
         let mut st = self.seller_stats.get(&seller).cloned().unwrap_or_default();
         st.awarded += 1;
-        st.earned = U128(st.earned.0 + bid.price.0);
         self.seller_stats.insert(seller, st);
         receipt
     }
 
-    /// The buyer (or its owner) records whether the awarded seller delivered. This is the seller's reputation.
+    /// The buyer (or its owner) records whether the awarded seller delivered. Delivered releases the escrowed
+    /// payment to the seller; disputed refunds it to the buyer's wallet. Either way it goes on the seller's record.
     pub fn confirm(&mut self, job_id: u64, delivered: bool) {
         let caller = env::predecessor_account_id();
         let job = self.job(job_id).clone();
         require!(caller == job.buyer || caller == job.owner, "only the buyer or its owner can confirm");
         require!(job.status == JobStatus::Awarded, "job is not awaiting confirmation");
-        let seller = job.winner.unwrap();
-        let mut st = self.seller_stats.get(&seller).cloned().unwrap_or_default();
         if delivered {
-            st.delivered += 1;
+            self.release(job_id);
         } else {
+            let seller = job.winner.unwrap();
+            let mut st = self.seller_stats.get(&seller).cloned().unwrap_or_default();
             st.disputed += 1;
+            self.seller_stats.insert(seller, st);
+            let w = self.wallet_mut(&job.owner);
+            w.budget = U128(w.budget.0 + job.price.0);
+            self.jobs.get_mut(job_id as u32).unwrap().status = JobStatus::Disputed;
+            env::log_str(&format!(
+                "EVENT_JSON:{{\"standard\":\"axiom-pay\",\"version\":\"3\",\"event\":\"refunded\",\"data\":{{\"job\":{job_id},\"amount\":\"{}\"}}}}",
+                job.price.0
+            ));
         }
-        self.seller_stats.insert(seller, st);
-        self.jobs.get_mut(job_id as u32).unwrap().status = if delivered { JobStatus::Delivered } else { JobStatus::Disputed };
+    }
+
+    /// The winner of a job claims its escrowed payment when the buyer has neither confirmed nor disputed within
+    /// `CLAIM_AFTER_NS` of the award. Counts as a delivery.
+    pub fn claim(&mut self, job_id: u64) {
+        let job = self.job(job_id).clone();
+        require!(job.status == JobStatus::Awarded, "job is not awaiting confirmation");
+        require!(job.winner.as_ref() == Some(&env::predecessor_account_id()), "only the winner can claim");
+        let awarded_at = self.receipts.get(job.receipt.unwrap() as u32).unwrap().timestamp_ns;
+        require!(env::block_timestamp() >= awarded_at + CLAIM_AFTER_NS, "the buyer still has time to confirm or dispute");
+        self.release(job_id);
     }
 
     pub fn cancel_job(&mut self, job_id: u64) {
@@ -741,6 +763,22 @@ impl AxiomPay {
 
     // ---------- internal ----------
 
+    /// Pays a job's escrowed price to its winner and records the delivery.
+    fn release(&mut self, job_id: u64) {
+        let job = self.job(job_id).clone();
+        let seller = job.winner.unwrap();
+        let mut st = self.seller_stats.get(&seller).cloned().unwrap_or_default();
+        st.delivered += 1;
+        st.earned = U128(st.earned.0 + job.price.0);
+        self.seller_stats.insert(seller.clone(), st);
+        self.jobs.get_mut(job_id as u32).unwrap().status = JobStatus::Delivered;
+        Promise::new(seller).transfer(NearToken::from_yoctonear(job.price.0)).detach();
+        env::log_str(&format!(
+            "EVENT_JSON:{{\"standard\":\"axiom-pay\",\"version\":\"3\",\"event\":\"released\",\"data\":{{\"job\":{job_id},\"amount\":\"{}\"}}}}",
+            job.price.0
+        ));
+    }
+
     fn from_v2(old: AxiomPayV2) -> Self {
         Self {
             wallets: old.wallets,
@@ -810,6 +848,7 @@ impl AxiomPay {
         amount: u128,
         request_hash: String,
         memo: String,
+        pay_now: bool,
     ) -> Receipt {
         let receipt = Receipt {
             id: self.receipts.len() as u64,
@@ -824,11 +863,12 @@ impl AxiomPay {
             block_height: env::block_height(),
         };
         self.receipts.push(receipt.clone());
-        if amount > 0 {
+        if pay_now && amount > 0 {
             Promise::new(provider).transfer(NearToken::from_yoctonear(amount)).detach();
         }
+        let event = if pay_now { "paid" } else { "escrowed" };
         env::log_str(&format!(
-            "EVENT_JSON:{{\"standard\":\"axiom-pay\",\"version\":\"3\",\"event\":\"paid\",\"data\":{{\"receipt\":{},\"service\":\"{}\",\"amount\":\"{}\"}}}}",
+            "EVENT_JSON:{{\"standard\":\"axiom-pay\",\"version\":\"3\",\"event\":\"{event}\",\"data\":{{\"receipt\":{},\"service\":\"{}\",\"amount\":\"{}\"}}}}",
             receipt.id, service_id, amount
         ));
         receipt
@@ -868,6 +908,7 @@ impl AxiomPay {
                 p.price.0,
                 p.request_hash.clone(),
                 memo,
+                true,
             );
             if let Some(s) = self.services.get_mut(&p.service_id) {
                 s.calls += 1;
@@ -1165,10 +1206,72 @@ mod tests {
         assert_eq!((r.service_id.as_str(), r.provider.as_str(), r.amount.0), ("job:0", "rival.testnet", NEAR / 80));
         assert_eq!(r.request_hash, job_request_hash(id, "sec-red-flags|JPM|2026-10-10"));
         assert_eq!(c.get_wallet(acc("buyer.testnet")).unwrap().budget.0, budget - NEAR / 80);
+        let st = c.get_seller_stats(acc("rival.testnet"));
+        assert_eq!((st.awarded, st.earned.0), (1, 0), "held in escrow, not yet earned");
         c.confirm(id, true);
         let st = c.get_seller_stats(acc("rival.testnet"));
-        assert_eq!((st.awarded, st.delivered, st.disputed), (1, 1, 0));
+        assert_eq!((st.awarded, st.delivered, st.disputed, st.earned.0), (1, 1, 0, NEAR / 80));
         assert_eq!(c.get_job(id).unwrap().status, JobStatus::Delivered);
+    }
+
+    #[test]
+    fn dispute_refunds_the_buyer() {
+        let mut c = setup();
+        let id = job_with_bids(&mut c);
+        let budget = c.get_wallet(acc("buyer.testnet")).unwrap().budget.0;
+        ctx("bot.testnet", 0, 1);
+        c.award(id, acc("rival.testnet"));
+        c.confirm(id, false);
+        assert_eq!(c.get_wallet(acc("buyer.testnet")).unwrap().budget.0, budget);
+        let st = c.get_seller_stats(acc("rival.testnet"));
+        assert_eq!((st.awarded, st.delivered, st.disputed, st.earned.0), (1, 0, 1, 0));
+        assert_eq!(c.get_job(id).unwrap().status, JobStatus::Disputed);
+    }
+
+    #[test]
+    #[should_panic(expected = "the buyer still has time to confirm or dispute")]
+    fn seller_cannot_claim_early() {
+        let mut c = setup();
+        let id = job_with_bids(&mut c);
+        ctx("bot.testnet", 0, 1);
+        c.award(id, acc("rival.testnet"));
+        ctx("rival.testnet", 0, 1);
+        c.claim(id);
+    }
+
+    #[test]
+    fn seller_claims_after_silence() {
+        let mut c = setup();
+        let id = job_with_bids(&mut c);
+        ctx("bot.testnet", 0, 1);
+        c.award(id, acc("rival.testnet"));
+        ctx("rival.testnet", 0, 2);
+        c.claim(id);
+        let st = c.get_seller_stats(acc("rival.testnet"));
+        assert_eq!((st.delivered, st.earned.0), (1, NEAR / 80));
+        assert_eq!(c.get_job(id).unwrap().status, JobStatus::Delivered);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the winner can claim")]
+    fn only_winner_claims() {
+        let mut c = setup();
+        let id = job_with_bids(&mut c);
+        ctx("bot.testnet", 0, 1);
+        c.award(id, acc("rival.testnet"));
+        ctx("seller.testnet", 0, 2);
+        c.claim(id);
+    }
+
+    #[test]
+    #[should_panic(expected = "job is not awaiting confirmation")]
+    fn no_refund_after_release() {
+        let mut c = setup();
+        let id = job_with_bids(&mut c);
+        ctx("bot.testnet", 0, 1);
+        c.award(id, acc("rival.testnet"));
+        c.confirm(id, true);
+        c.confirm(id, false);
     }
 
     #[test]

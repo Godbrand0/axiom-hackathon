@@ -315,6 +315,8 @@ enum NearCmd {
     },
     /// Agent: commit every ledger signal that is not on-chain yet (late ones will verify as LATE).
     CommitSignals,
+    /// Seller: claim the escrowed payment for a job you won, once the buyer has been silent for a day.
+    Claim { job_id: u64 },
     /// Seller: write the free track record (signals whose entry is known) to a JSON file, e.g. for the website.
     ExportRecord {
         #[arg(long, default_value = "web/public/track-record.json")]
@@ -1340,7 +1342,7 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                 methods.extend(["pay", "post_job", "award", "confirm", "cancel_job", "open_pool", "join_pool", "refund_pool"]);
             }
             if role != "buyer" {
-                methods.extend(["commit", "register_service", "bid"]);
+                methods.extend(["commit", "register_service", "bid", "claim"]);
             }
             let gas_amount = parse_near(&gas)?;
             let agent = Signer::generate(&agent_id)?;
@@ -1570,6 +1572,11 @@ async fn near_cmd(as_account: Option<&str>, cmd: NearCmd) -> Result<()> {
                     }
                 }
             }
+        }
+        NearCmd::Claim { job_id } => {
+            let ctx = near::Ctx::from_env(as_account)?;
+            let r = ctx.near.call(&ctx.signer, &ctx.contract, "claim", json!({"job_id": job_id}), 0).await?;
+            done(&format!("{} claimed the escrowed payment for job #{job_id}", ctx.signer.account_id), &r.hash);
         }
         NearCmd::CommitSignals => {
             let ctx = near::Ctx::from_env(as_account)?;

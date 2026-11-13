@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { explorerAccount } from "@/lib/config";
-import { MemeCheck, MemeSignal, fmtPrice, isMemeCommitment, verifyMeme } from "@/lib/meme";
+import { MemeCheck, MemeSignal, fmtPrice, isMemeCommitment, memeWindowEnd, verifyMeme } from "@/lib/meme";
 import { Commitment, fmtUtc, nsToDate } from "@/lib/near";
 import type { Market } from "@/lib/useMarket";
 
@@ -46,7 +46,9 @@ export default function MemePanel({ data }: { data: Market | null }) {
   const outcomes = useMemo(() => new Map((rec?.outcomes ?? []).map((o) => [o.hash, o.outcome])), [rec]);
   const published = new Set(rows.map((r) => r.hash).filter(Boolean));
   const done = rows.every((r) => r.check || r.err);
-  const sealed = (data?.sellerCommitments ?? []).filter((c) => isMemeCommitment(c) && done && !published.has(c.hash));
+  const sealed = (data?.sellerCommitments ?? []).filter(
+    (c) => isMemeCommitment(c) && done && !published.has(c.hash) && memeWindowEnd(c).getTime() <= Date.now(),
+  );
   const closed = rows.map((r) => (r.hash ? outcomes.get(r.hash) : null)).filter((o) => o && o.ret !== null && o.status !== "open");
   const wins = closed.filter((o) => (o!.ret ?? 0) > 0).length;
   const mean = closed.length ? closed.reduce((a, o) => a + (o!.ret ?? 0), 0) / closed.length : null;
@@ -58,8 +60,8 @@ export default function MemePanel({ data }: { data: Market | null }) {
           <h2 className="h3">Memecoin signals</h2>
           <p className="muted small">
             Breakouts on NEAR memecoins, each committed on-chain before it is sold and scored only from the first full hour after
-            the commitment. High-risk tokens never get a signal. Signals publish here when their 72-hour window ends; until then
-            they are sealed and for sale (<span className="mono">meme-signals</span>, 0.01 Ⓝ).
+            the commitment. High-risk tokens never get a signal. Signals publish here when their window ends; until then
+            they are on the shelf above. A seal whose window ended but was never published shows here as unrevealed.
           </p>
         </div>
         <div className="meta-row">
@@ -67,7 +69,7 @@ export default function MemePanel({ data }: { data: Market | null }) {
             <b>{rows.filter((r) => r.check === "ontime").length}</b> verified
           </span>
           <span>
-            <b>{sealed.length}</b> sealed
+            <b>{sealed.length}</b> unrevealed
           </span>
           <span>
             <b>{closed.length}</b> closed · {wins} wins{mean !== null && ` · mean ${pct(mean)}`}
@@ -126,14 +128,14 @@ export default function MemePanel({ data }: { data: Market | null }) {
               <tr key={c.hash}>
                 <td className="mono small">{fmtUtc(nsToDate(c.timestamp_ns))}</td>
                 <td>
-                  <span className="muted">Sealed signal</span>
+                  <span className="muted">Unrevealed signal</span>
                   <div className="hash small">{short(c.hash)}</div>
                 </td>
                 <td className="num-cell muted" colSpan={4}>
-                  committed at block {c.block_height.toLocaleString()}; contents for sale until its window ends
+                  committed at block {c.block_height.toLocaleString()}; its window ended {fmtUtc(memeWindowEnd(c))} but the seller has not published it
                 </td>
                 <td>
-                  <span className="chip lock">sealed</span>
+                  <span className="chip late">unrevealed</span>
                 </td>
                 <td className="num-cell muted">—</td>
               </tr>
@@ -141,8 +143,7 @@ export default function MemePanel({ data }: { data: Market | null }) {
             {data && rows.length === 0 && sealed.length === 0 && (
               <tr>
                 <td colSpan={8} className="empty">
-                  No memecoin breakout has fired yet. The agent scans NEAR&apos;s active pools every hour; risk screens are on sale
-                  meanwhile (<span className="mono">meme-risk</span>, 0.005 Ⓝ).
+                  No memecoin signal has finished its window yet. Live ones are on the shelf above.
                 </td>
               </tr>
             )}

@@ -125,7 +125,15 @@ pub async fn run(as_account: Option<&str>, cmd: MemeCmd) -> Result<()> {
             println!("\n{} new signal(s) recorded.", new.len());
             if let Some(ctx) = &ctx {
                 for m in &new {
-                    let label = format!("{LABEL} {}", m.signal_time.format("%Y-%m-%d"));
+                    // A public teaser for the shelf: everything except the token and the prices.
+                    let label = format!(
+                        "{LABEL} {} · risk {} {} · hold {}h · {}",
+                        m.setup,
+                        m.risk.level,
+                        m.risk.score,
+                        m.max_hold_h,
+                        m.signal_time.format("%Y-%m-%d")
+                    );
                     let deposit = ctx.near.storage_deposit(&ctx.signer, crate::near::client::parse_near("0.01")?).await?;
                     match ctx.near.call(&ctx.signer, &ctx.contract, "commit", json!({"hash": m.hash(), "label": label}), deposit).await {
                         Ok(r) => {

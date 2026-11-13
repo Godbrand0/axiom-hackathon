@@ -92,7 +92,7 @@ pub async fn hire(ctx: &Ctx, topic: &str, max_price: u128, wait: Duration, min_b
         .await
         .context("awarding the job")?;
     let receipt = awarded.value.as_ref().and_then(|v| v["id"].as_u64()).context("award returned no receipt")?;
-    println!("  {me} awarded job #{job_id} to {} for {}: receipt #{receipt}, {}", best.seller, fmt_near(best.price), ctx.near.explorer_tx(&awarded.hash));
+    println!("  {me} awarded job #{job_id} to {} for {} (held in escrow): receipt #{receipt}, {}", best.seller, fmt_near(best.price), ctx.near.explorer_tx(&awarded.hash));
 
     let url = format!("{}/v1/jobs/{job_id}", best.endpoint.trim_end_matches('/'));
     let delivered = redeem(&reqwest::Client::new(), &url, &[], receipt).await;
@@ -100,7 +100,7 @@ pub async fn hire(ctx: &Ctx, topic: &str, max_price: u128, wait: Duration, min_b
     let c = ctx.near.call(&ctx.signer, &ctx.contract, "confirm", json!({"job_id": job_id, "delivered": ok}), 0).await?;
     println!(
         "  {me} {} job #{job_id}: {}",
-        if ok { "confirmed delivery of" } else { "DISPUTED" },
+        if ok { "confirmed delivery, escrow released to the seller, for" } else { "DISPUTED, escrow refunded to the wallet, for" },
         ctx.near.explorer_tx(&c.hash)
     );
     let result = delivered?;

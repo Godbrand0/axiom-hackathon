@@ -23,7 +23,7 @@ The result is a small agent economy: the buyer bot pays Axiom, Axiom pays the ev
 
 `axiom near agent-create <name> --role buyer|seller --as <owner>` creates `<name>.<owner>` in one transaction:
 
-- The agent gets its **own key, restricted by NEAR itself**: it can call only its role's methods on the marketplace (buyers: `pay`, `post_job`, `award`, `confirm`, `open_pool`, `join_pool`, …; sellers: `commit`, `register_service`, `bid`). It **cannot attach NEAR** to a call, cannot send NEAR anywhere, and has a gas allowance. A stolen agent key cannot move money.
+- The agent gets its **own key, restricted by NEAR itself**: it can call only its role's methods on the marketplace (buyers: `pay`, `post_job`, `award`, `confirm`, `open_pool`, `join_pool`, …; sellers: `commit`, `register_service`, `bid`, `claim`). It **cannot attach NEAR** to a call, cannot send NEAR anywhere, and has a gas allowance. A stolen agent key cannot move money.
 - The owner's key is added as the account's **recovery key**, so the owner can always sweep a seller's earnings (`agent-sweep`) or rotate keys.
 - The owner prepays the agent's on-chain storage (`fund_storage`), because a restricted key cannot attach deposits.
 - A buyer joins the owner's wallet. One wallet can fund **a fleet of agents** with a shared budget, caps and approvals (`add_agent` / `remove_agent`).
@@ -32,8 +32,8 @@ Checked on testnet: an agent key calling `set_policy` is rejected with `MethodNa
 
 ### Agent swarm: bidding, reputation, collective purchase
 
-- **Jobs.** A buyer agent posts a job (`sec-red-flags|JPM|2026-10-11`) with a maximum price. Seller agents watch the board and bid on the jobs they can deliver. The buyer awards one bid and pays it from its wallet, under the same per-call cap, daily cap and budget. The receipt is bound to `sha256("axiom-job/v1|<id>|<topic>")`, and the winner delivers at `GET <endpoint>/v1/jobs/<id>?receipt=<n>`.
-- **Reputation.** The buyer confirms delivery or disputes it on-chain (`confirm`). Each seller's `delivered` / `disputed` counts are public. Buyers take the cheapest bid from a seller with no more disputes than deliveries.
+- **Jobs.** A buyer agent posts a job (`sec-red-flags|JPM|2026-10-11`) with a maximum price. Seller agents watch the board and bid on the jobs they can deliver. The buyer awards one bid; the price leaves its wallet under the same per-call cap, daily cap and budget, and the contract **holds it in escrow**. The receipt is bound to `sha256("axiom-job/v1|<id>|<topic>")`, and the winner delivers at `GET <endpoint>/v1/jobs/<id>?receipt=<n>`.
+- **Escrow and reputation.** The buyer confirms delivery, which releases the payment to the seller, or disputes it, which refunds its wallet (`confirm`). If the buyer does neither within a day, the seller can claim the payment (`claim`, counted as a delivery). Each seller's `delivered` / `disputed` counts are public. Buyers take the cheapest bid from a seller with no more disputes than deliveries.
 - **Pools.** Several agents from different owners split one purchase. Each share is debited from its own wallet (its owner must have approved the service) into escrow. The last share pays the seller and issues one receipt, which the seller honours once per member. An unfilled pool is refunded to the wallets after its deadline (`refund_pool`, callable by anyone).
 
 `axiom near swarm` runs the whole economy in one process: it starts each seller agent's server and bidding loop, has buyer agents hire them round by round, then has the buyers pool a purchase from Axiom.
@@ -46,6 +46,7 @@ Checked on testnet: an agent key calling `set_policy` is rejected with `MethodNa
 - **Rug-risk screen** (`meme-risk`, 0.005 NEAR): thin liquidity, pool age, top-10 holder share of circulating supply (FastNEAR's holder index, the token's own `ft_total_supply`, burned supply and DEX/bridge contracts excluded), volume far above liquidity (churn or wash trading), sells outnumbering buys, extreme 24h moves, and **copycats**: other tokens trading under the same ticker.
 - **Breakout signal** (`meme-signals`, 0.01 NEAR): the last closed hour closes above the previous 72 hours' high on more than twice the usual daily volume. Stop 3 hourly ATRs below (8–30%), target twice the risk, 72-hour limit. High-risk tokens get no signal.
 - **Committed before sale.** Each signal's hash (`axiom-meme/v1|token|pool|setup|time|entry|stop|target|hours`) is committed on-chain; only committed signals are sold.
+- **The shelf.** The commitment's label carries a public teaser (`axiom-meme/v1 meme-breakout · risk low 20 · hold 72h · 2026-11-13`): everything except the token and prices. The market page lists every sealed signal still inside its window, with the price of `meme-signals`, so an agent can buy ready-made picks at a fixed price instead of posting a job. When the window ends the full signal publishes and is checked against its seal.
 
 Why this record is stronger than the stock one: memecoin prices are public. **A signal is scored from the first hourly candle that starts after its on-chain commitment**, so the seller gets no head start, and `axiom meme verify` recomputes every outcome from GeckoTerminal itself instead of trusting the seller's numbers. It also counts the seller's memecoin commitments that were never revealed, so a seller that hides its losers is caught.
 
@@ -188,6 +189,7 @@ Memecoin research, 10 Nov 2026:
 | `meme backtest` over ~1,000 hourly candles per token | 12 trades, 6 wins, +4.8% mean after 1% costs. Too few trades to mean much, and only tokens still alive today are tested. | (off-chain) |
 | Buyer bot buys SINU's risk screen, 0.005 NEAR | high (70): one wallet holds nearly all circulating supply, thin liquidity | [BpAJnaH8…](https://testnet.nearblocks.io/txns/BpAJnaH8dJZ967iuprfZ9h3LqZUJx1xyPnJwVVmpzcZ2) |
 | Restricted agent `scout` posts job `meme-risk\|token.lonkingnearbackto2024.near`; Axiom bids 0.006 automatically | awarded, delivered (low, 10), confirmed | [8FQMiDzL…](https://testnet.nearblocks.io/txns/8FQMiDzLsjDNMaFqNEKeDBwweD5HQK9wYy227YSvGogX) |
+| Escrow upgrade (13 Nov): job #11, `nova` hires a WYRM risk screen for 0.006 | award logs `escrowed` and pays nobody; confirm logs `released` and pays the seller | [AuVSorXo…](https://testnet.nearblocks.io/txns/AuVSorXoMbDjCgr5hQpmKc5ZKHmL3b6i5bDDbXsv1cGg), [DqF5z8Mm…](https://testnet.nearblocks.io/txns/DqF5z8Mm4BnYdrsYwW9RTp1rCMXk28V2JASaiGWfW6jZ) |
 
 An earlier single-wallet version (`axiom-pay-33945.testnet`) was used to test on-chain cap enforcement, price-change re-approval, receipt replay, and ledger-tamper detection. Those behaviours carry over and are covered by the unit tests.
 
@@ -230,7 +232,7 @@ cd contract && cargo test   # contract (27): wallet isolation, approvals at pric
 - **NEAR's memecoin market is small.** On 10 Nov 2026, 20 tokens had more than $2K of liquidity, most of them launched that day; the largest pool held about $48K. Breakouts are rare, and the backtest has only 12 trades.
 - **Memecoin signals are untested live.** No breakout fired during the build, so no memecoin signal has been committed, sold and verified on testnet yet; `meme verify` has only run against an empty record. `axiom meme scan --near` run hourly will produce the first ones.
 - **Data comes from GeckoTerminal and FastNEAR.** Outcomes are recomputed from GeckoTerminal's candles, which aggregate on-chain swaps; a buyer could read the pool contract directly instead.
-- **Disputes are the buyer's word.** `confirm(delivered=false)` records what the buyer says; a dishonest buyer can dispute a good delivery. It still paid, so disputing has a price, but a seller cannot appeal on-chain yet.
+- **Disputes are the buyer's word.** `confirm(delivered=false)` refunds the buyer and marks the seller; a dishonest buyer can dispute a good delivery and get it free. Buyers' dispute counts are not tracked on-chain yet, so sellers cannot avoid such buyers, and there is no appeal. Jobs awarded before the 13 Nov upgrade (#0 to #10) were paid at award, with no escrow.
 - **Pool receipts are honoured once per member by count**, not per member identity: the seller cannot tell which member is calling over plain HTTP. A signed request from the member's key would fix this.
 - **Job sellers here are local processes.** Their endpoints are `127.0.0.1` URLs, so the swarm runs on one machine; on a server, `--endpoint` takes a public URL.
 - **Redeemed receipts live in the seller's memory.** A restarted seller would accept an unexpired receipt (under 15 minutes old) once more. The buyer is never charged twice.
